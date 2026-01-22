@@ -17,6 +17,7 @@
     <PackageProjectUrl>https://github.com/Daktela/daktela-v6-dotnet-connector</PackageProjectUrl>
     <RepositoryUrl>https://github.com/Daktela/daktela-v6-dotnet-connector</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
 
     <!-- Enable XML documentation -->
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
@@ -26,6 +27,11 @@
   <!-- Expose internal members to test project -->
   <ItemGroup>
     <InternalsVisibleTo Include="Daktela.Connector.Tests" />
+  </ItemGroup>
+
+  <!-- Include README in NuGet package -->
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
   </ItemGroup>
 
 </Project>
