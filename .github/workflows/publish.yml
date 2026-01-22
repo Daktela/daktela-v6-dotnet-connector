@@ -10,6 +10,8 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # Required for NuGet trusted publishing
 
     steps:
       - name: Checkout
@@ -36,5 +38,5 @@ jobs:
       - name: Pack
         run: dotnet pack src/Daktela.Connector/Daktela.Connector.csproj --no-build --configuration Release --output ./nupkg -p:PackageVersion=${{ steps.version.outputs.VERSION }}
 
-      - name: Push to NuGet
-        run: dotnet nuget push ./nupkg/*.nupkg --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+      - name: Push to NuGet (Trusted Publishing)
+        run: dotnet nuget push ./nupkg/*.nupkg --source https://api.nuget.org/v3/index.json --skip-duplicate
