@@ -39,6 +39,17 @@ public class RetryPolicy
     };
 
     /// <summary>
+    /// Whether POST, PUT, PATCH, and other potentially non-idempotent methods may be retried.
+    /// Disabled by default to avoid duplicate operations.
+    /// </summary>
+    public bool RetryUnsafeHttpMethods { get; set; }
+
+    /// <summary>
+    /// Whether timed-out idempotent requests should be retried. Default is true.
+    /// </summary>
+    public bool RetryOnTimeout { get; set; } = true;
+
+    /// <summary>
     /// Creates a default retry policy.
     /// </summary>
     public static RetryPolicy Default => new();
@@ -55,9 +66,31 @@ public class RetryPolicy
     /// <returns>The delay to wait before the next attempt.</returns>
     public TimeSpan GetDelay(int attempt)
     {
-        var delay = TimeSpan.FromMilliseconds(
-            InitialDelay.TotalMilliseconds * Math.Pow(BackoffMultiplier, attempt));
+        Validate();
+        if (attempt < 0)
+            throw new ArgumentOutOfRangeException(nameof(attempt));
 
-        return delay > MaxDelay ? MaxDelay : delay;
+        if (InitialDelay == TimeSpan.Zero)
+            return TimeSpan.Zero;
+
+        var milliseconds = InitialDelay.TotalMilliseconds * Math.Pow(BackoffMultiplier, attempt);
+        if (double.IsInfinity(milliseconds) || milliseconds >= MaxDelay.TotalMilliseconds)
+            return MaxDelay;
+
+        return TimeSpan.FromMilliseconds(milliseconds);
+    }
+
+    internal void Validate()
+    {
+        if (MaxRetries < 0)
+            throw new ArgumentOutOfRangeException(nameof(MaxRetries), "Max retries must be non-negative.");
+        if (InitialDelay < TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(InitialDelay), "Initial delay must be non-negative.");
+        if (MaxDelay < TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(MaxDelay), "Maximum delay must be non-negative.");
+        if (BackoffMultiplier < 1 || double.IsNaN(BackoffMultiplier) || double.IsInfinity(BackoffMultiplier))
+            throw new ArgumentOutOfRangeException(nameof(BackoffMultiplier), "Backoff multiplier must be a finite value of at least 1.");
+        if (RetryableStatusCodes == null)
+            throw new ArgumentNullException(nameof(RetryableStatusCodes));
     }
 }

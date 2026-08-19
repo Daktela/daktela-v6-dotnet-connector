@@ -19,23 +19,25 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 8.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
 
       - name: Extract version from tag
         id: version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
 
       - name: Restore dependencies
         run: dotnet restore
 
       - name: Build
-        run: dotnet build --no-restore --configuration Release
+        run: dotnet build --no-restore --configuration Release -p:Version=${{ steps.version.outputs.VERSION }} -p:ContinuousIntegrationBuild=true
 
       - name: Test
         run: dotnet test --no-build --configuration Release --verbosity normal
 
       - name: Pack
-        run: dotnet pack src/Daktela.Connector/Daktela.Connector.csproj --no-build --configuration Release --output ./nupkg -p:PackageVersion=${{ steps.version.outputs.VERSION }}
+        run: dotnet pack src/Daktela.Connector/Daktela.Connector.csproj --no-build --configuration Release --output ./nupkg -p:PackageVersion=${{ steps.version.outputs.VERSION }} -p:Version=${{ steps.version.outputs.VERSION }} -p:ContinuousIntegrationBuild=true
 
       - name: Login to NuGet (Trusted Publishing)
         id: nuget-login

@@ -1,4 +1,5 @@
 using Daktela.Connector.Query;
+using System.Globalization;
 using Xunit;
 
 namespace Daktela.Connector.Tests;
@@ -57,7 +58,7 @@ public class QueryBuilderTests
         var result = query.Build();
 
         Assert.Contains("sort[0][field]=created", result);
-        Assert.Contains("sort[0][direction]=desc", result);
+        Assert.Contains("sort[0][dir]=desc", result);
     }
 
     [Fact]
@@ -70,9 +71,9 @@ public class QueryBuilderTests
         var result = query.Build();
 
         Assert.Contains("sort[0][field]=status", result);
-        Assert.Contains("sort[0][direction]=asc", result);
+        Assert.Contains("sort[0][dir]=asc", result);
         Assert.Contains("sort[1][field]=created", result);
-        Assert.Contains("sort[1][direction]=desc", result);
+        Assert.Contains("sort[1][dir]=desc", result);
     }
 
     [Fact]
@@ -149,8 +150,15 @@ public class QueryBuilderTests
     [InlineData(FilterOperator.Lt, "lt")]
     [InlineData(FilterOperator.Lte, "lte")]
     [InlineData(FilterOperator.Like, "like")]
+    [InlineData(FilterOperator.Contains, "contains")]
+    [InlineData(FilterOperator.StartsWith, "startswith")]
+    [InlineData(FilterOperator.EndsWith, "endswith")]
+    [InlineData(FilterOperator.NotLike, "notlike")]
+    [InlineData(FilterOperator.DoesNotContain, "doesnotcontain")]
+    [InlineData(FilterOperator.IsNull, "isnull")]
+    [InlineData(FilterOperator.IsNotNull, "isnotnull")]
     [InlineData(FilterOperator.In, "in")]
-    [InlineData(FilterOperator.NotIn, "notIn")]
+    [InlineData(FilterOperator.NotIn, "notin")]
     public void FilterOperator_MapsCorrectly(FilterOperator op, string expected)
     {
         var query = new QueryBuilder()
@@ -180,6 +188,112 @@ public class QueryBuilderTests
 
         Assert.Contains("take=20", cloneResult);
         Assert.Contains("fields[1]=email", cloneResult);
+    }
+
+    [Fact]
+    public void OrFilter_BuildsNestedFilterTree()
+    {
+        var query = new QueryBuilder()
+            .OrFilter(group => group
+                .Filter("status", FilterOperator.Eq, "new")
+                .Filter("status", FilterOperator.Eq, "open"));
+
+        var result = query.Build();
+
+        Assert.Contains("filter[logic]=or", result);
+        Assert.Contains("filter[filters][0][field]=status", result);
+        Assert.Contains("filter[filters][0][value]=new", result);
+        Assert.Contains("filter[filters][1][value]=open", result);
+    }
+
+    [Fact]
+    public void MixedFilters_BuildTopLevelAndTree()
+    {
+        var query = new QueryBuilder()
+            .Filter("active", FilterOperator.Eq, true)
+            .OrFilter(group => group
+                .Filter("team", FilterOperator.Eq, "sales")
+                .Filter("team", FilterOperator.Eq, "support"));
+
+        var result = query.Build();
+
+        Assert.Contains("filter[logic]=and", result);
+        Assert.Contains("filter[filters][0][field]=active", result);
+        Assert.Contains("filter[filters][1][logic]=or", result);
+        Assert.Contains("filter[filters][1][filters][1][value]=support", result);
+    }
+
+    [Fact]
+    public void CustomOperator_IsPassedThrough()
+    {
+        var result = new QueryBuilder()
+            .Filter("custom", "future_operator", "value")
+            .Build();
+
+        Assert.Contains("filter[0][operator]=future_operator", result);
+    }
+
+    [Fact]
+    public void Parameter_EncodesNestedDictionariesAndLists()
+    {
+        var query = new QueryBuilder().Parameter("custom", new Dictionary<string, object?>
+        {
+            ["enabled"] = true,
+            ["ids"] = new[] { 10, 20 }
+        });
+
+        var result = query.Build();
+
+        Assert.Contains("custom[enabled]=1", result);
+        Assert.Contains("custom[ids][0]=10", result);
+        Assert.Contains("custom[ids][1]=20", result);
+    }
+
+    [Fact]
+    public void NumericValues_UseInvariantCulture()
+    {
+        var originalCulture = CultureInfo.CurrentCulture;
+        try
+        {
+            CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo("cs-CZ");
+
+            var result = new QueryBuilder()
+                .Filter("price", FilterOperator.Gte, 12.5m)
+                .Build();
+
+            Assert.Contains("filter[0][value]=12.5", result);
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = originalCulture;
+        }
+    }
+
+    [Fact]
+    public void Clone_DeepCopiesMutableFilterAndParameterValues()
+    {
+        var filterValues = new[] { "new", "open" };
+        var parameterValues = new List<int> { 1, 2 };
+        var original = new QueryBuilder()
+            .Filter("status", FilterOperator.In, filterValues)
+            .Parameter("ids", parameterValues);
+
+        var clone = original.Clone();
+        filterValues[0] = "changed";
+        parameterValues[0] = 99;
+
+        Assert.Contains("filter[0][value][0]=new", clone.Build());
+        Assert.Contains("ids[0]=1", clone.Build());
+        Assert.Contains("filter[0][value][0]=changed", original.Build());
+        Assert.Contains("ids[0]=99", original.Build());
+    }
+
+    [Fact]
+    public void EmptyFilterGroup_Throws()
+    {
+        var query = new QueryBuilder();
+
+        Assert.Throws<ArgumentException>(() => query.OrFilter(_ => { }));
     }
 
     [Fact]

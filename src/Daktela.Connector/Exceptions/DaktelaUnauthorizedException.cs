@@ -10,8 +10,11 @@ public class DaktelaUnauthorizedException : DaktelaException
     {
     }
 
-    public DaktelaUnauthorizedException(string message, string? responseBody)
-        : base(message, 401, responseBody)
+    public DaktelaUnauthorizedException(
+        string message,
+        string? responseBody,
+        IReadOnlyList<DaktelaError>? errors = null)
+        : base(message, 401, responseBody, errors)
     {
     }
 }

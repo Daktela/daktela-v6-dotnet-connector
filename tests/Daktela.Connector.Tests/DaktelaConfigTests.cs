@@ -5,11 +5,13 @@ namespace Daktela.Connector.Tests;
 public class DaktelaConfigTests
 {
     [Theory]
-    [InlineData("my.daktela.com", "https://my.daktela.com/api/v6")]
-    [InlineData("https://my.daktela.com", "https://my.daktela.com/api/v6")]
-    [InlineData("http://my.daktela.com", "http://my.daktela.com/api/v6")]
-    [InlineData("my.daktela.com/", "https://my.daktela.com/api/v6")]
-    [InlineData("https://my.daktela.com/", "https://my.daktela.com/api/v6")]
+    [InlineData("my.daktela.com", "https://my.daktela.com/api/v6/")]
+    [InlineData("https://my.daktela.com", "https://my.daktela.com/api/v6/")]
+    [InlineData("http://my.daktela.com", "http://my.daktela.com/api/v6/")]
+    [InlineData("my.daktela.com/", "https://my.daktela.com/api/v6/")]
+    [InlineData("https://my.daktela.com/", "https://my.daktela.com/api/v6/")]
+    [InlineData("https://my.daktela.com/api/v6", "https://my.daktela.com/api/v6/")]
+    [InlineData("https://my.daktela.com/api/v6/", "https://my.daktela.com/api/v6/")]
     public void GetBaseUrl_ReturnsCorrectUrl(string instanceUrl, string expected)
     {
         var config = new DaktelaConfig
@@ -21,6 +23,21 @@ public class DaktelaConfigTests
         var result = config.GetBaseUrl();
 
         Assert.Equal(expected, result);
+    }
+
+    [Theory]
+    [InlineData("ftp://my.daktela.com")]
+    [InlineData("https://my.daktela.com?tenant=test")]
+    [InlineData("https://my.daktela.com#fragment")]
+    public void GetBaseUrl_WithInvalidUrl_Throws(string instanceUrl)
+    {
+        var config = new DaktelaConfig
+        {
+            InstanceUrl = instanceUrl,
+            AccessToken = "test-token"
+        };
+
+        Assert.Throws<ArgumentException>(() => config.GetBaseUrl());
     }
 
     [Fact]

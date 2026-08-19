@@ -1,23 +1,24 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
 
     <!-- NuGet Package Metadata -->
     <PackageId>Daktela.Connector</PackageId>
-    <Version>1.0.0</Version>
+    <Version>1.0.2</Version>
     <Authors>Daktela</Authors>
     <Company>Daktela</Company>
-    <Description>Official .NET connector for Daktela V6 API</Description>
+    <Description>Typed .NET client for the Daktela V6 API with filtering, pagination, retries, and structured errors.</Description>
     <PackageTags>daktela;api;connector;callcenter;contact-center</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/Daktela/daktela-v6-dotnet-connector</PackageProjectUrl>
     <RepositoryUrl>https://github.com/Daktela/daktela-v6-dotnet-connector</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
 
     <!-- Enable XML documentation -->
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
@@ -32,6 +33,7 @@
   <!-- Include README in NuGet package -->
   <ItemGroup>
     <None Include="../../README.md" Pack="true" PackagePath="/" />
+    <None Include="../../LICENSE" Pack="true" PackagePath="/" />
   </ItemGroup>
 
 </Project>

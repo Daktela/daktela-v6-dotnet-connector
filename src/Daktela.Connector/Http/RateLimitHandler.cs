@@ -1,3 +1,5 @@
+using System.Globalization;
+
 namespace Daktela.Connector.Http;
 
 /// <summary>
@@ -16,13 +18,25 @@ internal class RateLimitHandler
             return null;
 
         // Try to parse as seconds (integer)
-        if (int.TryParse(retryAfterHeader, out var seconds))
+        if (long.TryParse(
+                retryAfterHeader,
+                NumberStyles.Integer,
+                CultureInfo.InvariantCulture,
+                out var seconds))
         {
-            return TimeSpan.FromSeconds(seconds);
+            if (seconds <= 0)
+                return TimeSpan.Zero;
+            return seconds >= TimeSpan.MaxValue.TotalSeconds
+                ? TimeSpan.MaxValue
+                : TimeSpan.FromSeconds(seconds);
         }
 
         // Try to parse as HTTP date
-        if (DateTimeOffset.TryParse(retryAfterHeader, out var date))
+        if (DateTimeOffset.TryParse(
+                retryAfterHeader,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                out var date))
         {
             var delay = date - DateTimeOffset.UtcNow;
             return delay > TimeSpan.Zero ? delay : TimeSpan.Zero;

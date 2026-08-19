@@ -10,8 +10,11 @@ public class DaktelaNotFoundException : DaktelaException
     {
     }
 
-    public DaktelaNotFoundException(string message, string? responseBody)
-        : base(message, 404, responseBody)
+    public DaktelaNotFoundException(
+        string message,
+        string? responseBody,
+        IReadOnlyList<DaktelaError>? errors = null)
+        : base(message, 404, responseBody, errors)
     {
     }
 }

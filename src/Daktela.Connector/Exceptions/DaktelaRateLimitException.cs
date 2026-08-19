@@ -15,8 +15,12 @@ public class DaktelaRateLimitException : DaktelaException
     {
     }
 
-    public DaktelaRateLimitException(string message, TimeSpan? retryAfter, string? responseBody = null)
-        : base(message, 429, responseBody)
+    public DaktelaRateLimitException(
+        string message,
+        TimeSpan? retryAfter,
+        string? responseBody = null,
+        IReadOnlyList<DaktelaError>? errors = null)
+        : base(message, 429, responseBody, errors)
     {
         RetryAfter = retryAfter;
     }

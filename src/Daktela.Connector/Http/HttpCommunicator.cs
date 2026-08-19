@@ -9,35 +9,47 @@ namespace Daktela.Connector.Http;
 /// <summary>
 /// Handles HTTP communication with the Daktela API.
 /// </summary>
-internal class HttpCommunicator : IDisposable
+internal sealed class HttpCommunicator : IDisposable
 {
     private readonly HttpClient _httpClient;
+    private readonly bool _ownsHttpClient;
     private readonly DaktelaConfig _config;
     private readonly RetryPolicy? _retryPolicy;
+    private readonly Uri _baseUri;
+    private readonly JsonSerializerOptions _jsonOptions;
+    private readonly TimeSpan _timeout;
     private bool _disposed;
 
-    public HttpCommunicator(DaktelaConfig config)
+    public HttpCommunicator(
+        DaktelaConfig config,
+        JsonSerializerOptions jsonOptions,
+        HttpClient? httpClient = null)
     {
         _config = config;
         _retryPolicy = config.RetryPolicy;
+        _retryPolicy?.Validate();
+        _baseUri = new Uri(config.GetBaseUrl(), UriKind.Absolute);
+        _jsonOptions = jsonOptions;
+        _timeout = config.Timeout;
+
+        if (httpClient != null)
+        {
+            _httpClient = httpClient;
+            _ownsHttpClient = false;
+            return;
+        }
 
         var handler = new HttpClientHandler();
-
         if (!config.VerifySsl)
-        {
             handler.ServerCertificateCustomValidationCallback =
                 HttpClientHandler.DangerousAcceptAnyServerCertificateValidator;
-        }
 
         _httpClient = new HttpClient(handler)
         {
-            BaseAddress = new Uri(config.GetBaseUrl()),
-            Timeout = config.Timeout
+            // Apply the same per-request timeout to both internally created and injected clients.
+            Timeout = Timeout.InfiniteTimeSpan
         };
-
-        // Set default headers
-        _httpClient.DefaultRequestHeaders.Accept.Add(
-            new MediaTypeWithQualityHeaderValue("application/json"));
+        _ownsHttpClient = true;
     }
 
     public async Task<HttpResponseMessage> SendAsync(
@@ -46,40 +58,50 @@ internal class HttpCommunicator : IDisposable
         object? body = null,
         CancellationToken cancellationToken = default)
     {
+        ObjectDisposedException.ThrowIf(_disposed, this);
         var attempt = 0;
-        var maxAttempts = (_retryPolicy?.MaxRetries ?? 0) + 1;
+        var canRetryMethod = IsSafeToRetry(method) || _retryPolicy?.RetryUnsafeHttpMethods == true;
 
         while (true)
         {
             try
             {
-                var request = CreateRequest(method, endpoint, body);
-                var response = await _httpClient.SendAsync(request, cancellationToken);
+                using var request = CreateRequest(method, endpoint, body);
+                using var timeoutSource = CreateTimeoutSource(cancellationToken);
+                var response = await _httpClient.SendAsync(
+                    request,
+                    HttpCompletionOption.ResponseHeadersRead,
+                    timeoutSource?.Token ?? cancellationToken).ConfigureAwait(false);
 
-                // Check if we should retry
-                if (!response.IsSuccessStatusCode &&
-                    _retryPolicy != null &&
-                    attempt < _retryPolicy.MaxRetries &&
-                    _retryPolicy.RetryableStatusCodes.Contains((int)response.StatusCode))
+                if (ShouldRetry(response.StatusCode, attempt, canRetryMethod))
                 {
                     var delay = GetRetryDelay(response, attempt);
-                    await Task.Delay(delay, cancellationToken);
+                    response.Dispose();
+                    await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
                     attempt++;
                     continue;
                 }
 
                 return response;
             }
-            catch (TaskCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+            catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
             {
+                if (canRetryMethod &&
+                    _retryPolicy?.RetryOnTimeout == true &&
+                    attempt < _retryPolicy.MaxRetries)
+                {
+                    await Task.Delay(_retryPolicy.GetDelay(attempt), cancellationToken).ConfigureAwait(false);
+                    attempt++;
+                    continue;
+                }
+
                 throw new DaktelaTimeoutException("The request timed out.", ex);
             }
             catch (HttpRequestException ex)
             {
-                if (_retryPolicy != null && attempt < _retryPolicy.MaxRetries)
+                if (canRetryMethod && _retryPolicy != null && attempt < _retryPolicy.MaxRetries)
                 {
-                    var delay = _retryPolicy.GetDelay(attempt);
-                    await Task.Delay(delay, cancellationToken);
+                    await Task.Delay(_retryPolicy.GetDelay(attempt), cancellationToken).ConfigureAwait(false);
                     attempt++;
                     continue;
                 }
@@ -91,40 +113,46 @@ internal class HttpCommunicator : IDisposable
 
     private HttpRequestMessage CreateRequest(HttpMethod method, string endpoint, object? body)
     {
-        var url = BuildUrl(endpoint);
-        var request = new HttpRequestMessage(method, url);
+        var request = new HttpRequestMessage(method, BuildUrl(endpoint));
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        request.Headers.UserAgent.ParseAdd("Daktela.Connector/1.0");
+        ApplyAuthentication(request);
 
-        // Apply authentication
-        ApplyAuthentication(request, url);
-
-        // Add body if present
         if (body != null)
         {
-            var json = JsonSerializer.Serialize(body, new JsonSerializerOptions
-            {
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-            });
+            var json = JsonSerializer.Serialize(body, _jsonOptions);
             request.Content = new StringContent(json, Encoding.UTF8, "application/json");
         }
 
         return request;
     }
 
-    private string BuildUrl(string endpoint)
+    private Uri BuildUrl(string endpoint)
     {
-        var url = endpoint.TrimStart('/');
+        if (string.IsNullOrWhiteSpace(endpoint))
+            throw new ArgumentException("Endpoint cannot be null or empty.", nameof(endpoint));
+        if (Uri.TryCreate(endpoint, UriKind.Absolute, out _))
+            throw new ArgumentException("Endpoint must be relative to the configured Daktela instance.", nameof(endpoint));
 
-        // Add access token as query parameter if that auth method is selected
-        if (_config.AuthMethod == AuthMethod.QueryParam)
-        {
-            var separator = url.Contains('?') ? "&" : "?";
-            url = $"{url}{separator}accessToken={Uri.EscapeDataString(_config.AccessToken)}";
-        }
+        var relativeEndpoint = endpoint.TrimStart('/');
+        var uri = new Uri(_baseUri, relativeEndpoint);
+        if (!_baseUri.IsBaseOf(uri))
+            throw new ArgumentException(
+                "Endpoint must remain within the configured Daktela API path.",
+                nameof(endpoint));
 
-        return url;
+        if (_config.AuthMethod != AuthMethod.QueryParam)
+            return uri;
+
+        var builder = new UriBuilder(uri);
+        var token = $"accessToken={Uri.EscapeDataString(_config.AccessToken)}";
+        builder.Query = string.IsNullOrEmpty(builder.Query)
+            ? token
+            : builder.Query.TrimStart('?') + "&" + token;
+        return builder.Uri;
     }
 
-    private void ApplyAuthentication(HttpRequestMessage request, string url)
+    private void ApplyAuthentication(HttpRequestMessage request)
     {
         switch (_config.AuthMethod)
         {
@@ -133,37 +161,62 @@ internal class HttpCommunicator : IDisposable
                 break;
 
             case AuthMethod.Cookie:
-                request.Headers.Add("Cookie", $"c_user={_config.AccessToken}");
+                request.Headers.Add("Cookie", $"c_user={Uri.EscapeDataString(_config.AccessToken)}");
                 break;
 
             case AuthMethod.QueryParam:
-                // Already handled in BuildUrl
                 break;
+
+            default:
+                throw new ArgumentOutOfRangeException(nameof(_config.AuthMethod), _config.AuthMethod,
+                    "Unknown authentication method.");
         }
     }
 
+    private bool ShouldRetry(HttpStatusCode statusCode, int attempt, bool canRetryMethod)
+        => canRetryMethod &&
+           _retryPolicy != null &&
+           attempt < _retryPolicy.MaxRetries &&
+           _retryPolicy.RetryableStatusCodes.Contains((int)statusCode);
+
     private TimeSpan GetRetryDelay(HttpResponseMessage response, int attempt)
     {
-        // Check for Retry-After header (especially for 429)
         if (response.StatusCode == HttpStatusCode.TooManyRequests &&
             response.Headers.TryGetValues("Retry-After", out var values))
         {
             var retryAfter = RateLimitHandler.ParseRetryAfter(values.FirstOrDefault());
             if (retryAfter.HasValue)
             {
-                return retryAfter.Value;
+                var nonNegativeDelay = retryAfter.Value < TimeSpan.Zero ? TimeSpan.Zero : retryAfter.Value;
+                return _retryPolicy != null && nonNegativeDelay > _retryPolicy.MaxDelay
+                    ? _retryPolicy.MaxDelay
+                    : nonNegativeDelay;
             }
         }
 
-        return _retryPolicy?.GetDelay(attempt) ?? TimeSpan.FromSeconds(1);
+        return _retryPolicy?.GetDelay(attempt) ?? TimeSpan.Zero;
+    }
+
+    private static bool IsSafeToRetry(HttpMethod method)
+        => method == HttpMethod.Get || method == HttpMethod.Head || method == HttpMethod.Options;
+
+    private CancellationTokenSource? CreateTimeoutSource(CancellationToken cancellationToken)
+    {
+        if (_timeout == Timeout.InfiniteTimeSpan)
+            return null;
+
+        var source = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        source.CancelAfter(_timeout);
+        return source;
     }
 
     public void Dispose()
     {
-        if (!_disposed)
-        {
+        if (_disposed)
+            return;
+
+        if (_ownsHttpClient)
             _httpClient.Dispose();
-            _disposed = true;
-        }
+        _disposed = true;
     }
 }

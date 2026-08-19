@@ -1,5 +1,5 @@
+using System.Collections;
 using System.Globalization;
-using System.Text;
 using System.Web;
 
 namespace Daktela.Connector.Query;
@@ -10,82 +10,91 @@ namespace Daktela.Connector.Query;
 public class QueryBuilder
 {
     private readonly List<string> _fields = new();
-    private readonly List<FilterGroup> _filterGroups = new();
+    private readonly List<FilterNode> _filters = new();
     private readonly List<Sort> _sorts = new();
+    private readonly Dictionary<string, object?> _parameters = new(StringComparer.Ordinal);
     private int? _take;
     private int? _skip;
 
-    private class FilterGroup
+    private sealed class FilterNode
     {
-        public List<Filter> Filters { get; } = new();
-        public bool IsOr { get; set; }
+        public string? Field { get; init; }
+        public string? Operator { get; init; }
+        public object? Value { get; init; }
+        public string? Logic { get; init; }
+        public List<FilterNode> Children { get; init; } = new();
+        public bool IsGroup => Logic != null;
+
+        public FilterNode Clone() => new()
+        {
+            Field = Field,
+            Operator = Operator,
+            Value = QueryBuilder.CloneValue(Value),
+            Logic = Logic,
+            Children = Children.Select(child => child.Clone()).ToList()
+        };
     }
 
     /// <summary>
     /// Specifies which fields to return in the response.
     /// </summary>
-    /// <param name="fields">The field names to include.</param>
     public QueryBuilder Fields(params string[] fields)
     {
-        _fields.AddRange(fields);
-        return this;
-    }
-
-    /// <summary>
-    /// Adds a filter condition (AND logic with other filters).
-    /// </summary>
-    /// <param name="field">The field name to filter on.</param>
-    /// <param name="op">The comparison operator.</param>
-    /// <param name="value">The value to compare against.</param>
-    public QueryBuilder Filter(string field, FilterOperator op, object value)
-    {
-        var filter = new Filter(field, op, value);
-
-        // Add to the last AND group or create a new one
-        var lastGroup = _filterGroups.LastOrDefault(g => !g.IsOr);
-        if (lastGroup == null)
+        ArgumentNullException.ThrowIfNull(fields);
+        foreach (var field in fields)
         {
-            lastGroup = new FilterGroup { IsOr = false };
-            _filterGroups.Add(lastGroup);
+            if (string.IsNullOrWhiteSpace(field))
+                throw new ArgumentException("Field names cannot be null or empty.", nameof(fields));
+            _fields.Add(field);
         }
-        lastGroup.Filters.Add(filter);
-
         return this;
     }
 
     /// <summary>
-    /// Adds a filter using an existing Filter object.
+    /// Adds a filter condition using AND logic with other top-level filters.
     /// </summary>
-    /// <param name="filter">The filter to add.</param>
+    public QueryBuilder Filter(string field, FilterOperator op, object value)
+        => Filter(field, op.ToApiString(), value);
+
+    /// <summary>
+    /// Adds a filter with an API operator name. This overload supports operators added by
+    /// newer Daktela versions without requiring a connector update.
+    /// </summary>
+    public QueryBuilder Filter(string field, string op, object? value)
+    {
+        if (string.IsNullOrWhiteSpace(field))
+            throw new ArgumentException("Field name cannot be null or empty.", nameof(field));
+        if (string.IsNullOrWhiteSpace(op))
+            throw new ArgumentException("Operator cannot be null or empty.", nameof(op));
+
+        _filters.Add(new FilterNode { Field = field, Operator = op, Value = value });
+        return this;
+    }
+
+    /// <summary>
+    /// Adds a filter using an existing <see cref="Query.Filter"/> object.
+    /// </summary>
     public QueryBuilder Filter(Filter filter)
     {
+        ArgumentNullException.ThrowIfNull(filter);
         return Filter(filter.Field, filter.Operator, filter.Value);
     }
 
     /// <summary>
-    /// Adds a group of filters with OR logic between them.
+    /// Adds a nested group of filters joined with OR logic.
     /// </summary>
-    /// <param name="orGroup">Action to configure the OR group.</param>
     public QueryBuilder OrFilter(Action<QueryBuilder> orGroup)
-    {
-        var subBuilder = new QueryBuilder();
-        orGroup(subBuilder);
+        => AddFilterGroup("or", orGroup);
 
-        var group = new FilterGroup { IsOr = true };
-        foreach (var filterGroup in subBuilder._filterGroups)
-        {
-            group.Filters.AddRange(filterGroup.Filters);
-        }
-        _filterGroups.Add(group);
-
-        return this;
-    }
+    /// <summary>
+    /// Adds a nested group of filters joined with AND logic.
+    /// </summary>
+    public QueryBuilder AndFilter(Action<QueryBuilder> andGroup)
+        => AddFilterGroup("and", andGroup);
 
     /// <summary>
     /// Adds a sort condition.
     /// </summary>
-    /// <param name="field">The field name to sort by.</param>
-    /// <param name="direction">The sort direction.</param>
     public QueryBuilder Sort(string field, SortDirection direction = SortDirection.Asc)
     {
         _sorts.Add(new Sort(field, direction));
@@ -93,24 +102,45 @@ public class QueryBuilder
     }
 
     /// <summary>
-    /// Adds a sort using an existing Sort object.
+    /// Adds a sort using an existing <see cref="Query.Sort"/> object.
     /// </summary>
-    /// <param name="sort">The sort to add.</param>
     public QueryBuilder Sort(Sort sort)
     {
+        ArgumentNullException.ThrowIfNull(sort);
         _sorts.Add(sort);
+        return this;
+    }
+
+    /// <summary>
+    /// Adds or replaces an arbitrary top-level query parameter.
+    /// Dictionaries and collections are encoded using PHP-style bracket notation.
+    /// </summary>
+    public QueryBuilder Parameter(string name, object? value)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+            throw new ArgumentException("Parameter name cannot be null or empty.", nameof(name));
+        _parameters[name] = value;
+        return this;
+    }
+
+    /// <summary>
+    /// Adds or replaces arbitrary top-level query parameters.
+    /// </summary>
+    public QueryBuilder Parameters(IEnumerable<KeyValuePair<string, object?>> parameters)
+    {
+        ArgumentNullException.ThrowIfNull(parameters);
+        foreach (var parameter in parameters)
+            Parameter(parameter.Key, parameter.Value);
         return this;
     }
 
     /// <summary>
     /// Sets the maximum number of records to return.
     /// </summary>
-    /// <param name="count">The maximum number of records.</param>
     public QueryBuilder Take(int count)
     {
         if (count < 0)
             throw new ArgumentOutOfRangeException(nameof(count), "Take count must be non-negative.");
-
         _take = count;
         return this;
     }
@@ -118,97 +148,46 @@ public class QueryBuilder
     /// <summary>
     /// Sets the number of records to skip.
     /// </summary>
-    /// <param name="count">The number of records to skip.</param>
     public QueryBuilder Skip(int count)
     {
         if (count < 0)
             throw new ArgumentOutOfRangeException(nameof(count), "Skip count must be non-negative.");
-
         _skip = count;
         return this;
     }
 
     /// <summary>
-    /// Builds the query string for the API request.
+    /// Builds the encoded query string without a leading question mark.
     /// </summary>
-    /// <returns>The encoded query string (without leading ?).</returns>
     public string Build()
     {
         var parts = new List<string>();
 
-        // Fields
-        if (_fields.Count > 0)
+        for (var i = 0; i < _fields.Count; i++)
+            parts.Add($"fields[{i}]={Encode(_fields[i])}");
+
+        AppendFilters(parts);
+
+        for (var i = 0; i < _sorts.Count; i++)
         {
-            for (int i = 0; i < _fields.Count; i++)
-            {
-                parts.Add($"fields[{i}]={HttpUtility.UrlEncode(_fields[i])}");
-            }
+            parts.Add($"sort[{i}][field]={Encode(_sorts[i].Field)}");
+            parts.Add($"sort[{i}][dir]={_sorts[i].Direction.ToApiString()}");
         }
 
-        // Filters
-        int filterIndex = 0;
-        foreach (var group in _filterGroups)
-        {
-            foreach (var filter in group.Filters)
-            {
-                var fieldEncoded = HttpUtility.UrlEncode(filter.Field);
-                var opEncoded = filter.Operator.ToApiString();
-                var valueEncoded = FormatValue(filter.Value);
-
-                parts.Add($"filter[{filterIndex}][field]={fieldEncoded}");
-                parts.Add($"filter[{filterIndex}][operator]={opEncoded}");
-
-                if (filter.Value is Array arr)
-                {
-                    for (int i = 0; i < arr.Length; i++)
-                    {
-                        parts.Add($"filter[{filterIndex}][value][{i}]={FormatValue(arr.GetValue(i))}");
-                    }
-                }
-                else
-                {
-                    parts.Add($"filter[{filterIndex}][value]={valueEncoded}");
-                }
-
-                filterIndex++;
-            }
-        }
-
-        // Sorts
-        for (int i = 0; i < _sorts.Count; i++)
-        {
-            var sort = _sorts[i];
-            parts.Add($"sort[{i}][field]={HttpUtility.UrlEncode(sort.Field)}");
-            parts.Add($"sort[{i}][direction]={sort.Direction.ToApiString()}");
-        }
-
-        // Pagination
         if (_take.HasValue)
-        {
-            parts.Add($"take={_take.Value}");
-        }
-
+            parts.Add($"take={_take.Value.ToString(CultureInfo.InvariantCulture)}");
         if (_skip.HasValue)
-        {
-            parts.Add($"skip={_skip.Value}");
-        }
+            parts.Add($"skip={_skip.Value.ToString(CultureInfo.InvariantCulture)}");
+
+        foreach (var parameter in _parameters)
+            AppendParameter(parts, Encode(parameter.Key), parameter.Value);
 
         return string.Join("&", parts);
     }
 
-    /// <summary>
-    /// Gets the current skip value.
-    /// </summary>
     internal int? GetSkip() => _skip;
-
-    /// <summary>
-    /// Gets the current take value.
-    /// </summary>
     internal int? GetTake() => _take;
 
-    /// <summary>
-    /// Creates a new QueryBuilder with updated skip value for pagination.
-    /// </summary>
     internal QueryBuilder WithSkip(int skip)
     {
         var clone = Clone();
@@ -216,29 +195,148 @@ public class QueryBuilder
         return clone;
     }
 
+    internal QueryBuilder WithTake(int take)
+    {
+        var clone = Clone();
+        clone._take = take;
+        return clone;
+    }
+
     /// <summary>
-    /// Creates a clone of this QueryBuilder.
+    /// Creates an independent clone of this query.
     /// </summary>
     public QueryBuilder Clone()
     {
         var clone = new QueryBuilder();
         clone._fields.AddRange(_fields);
-        clone._filterGroups.AddRange(_filterGroups);
+        clone._filters.AddRange(_filters.Select(filter => filter.Clone()));
         clone._sorts.AddRange(_sorts);
+        foreach (var parameter in _parameters)
+            clone._parameters.Add(parameter.Key, CloneValue(parameter.Value));
         clone._take = _take;
         clone._skip = _skip;
         return clone;
     }
 
-    private static string FormatValue(object? value)
+    private QueryBuilder AddFilterGroup(string logic, Action<QueryBuilder> configure)
     {
-        return value switch
+        ArgumentNullException.ThrowIfNull(configure);
+        var childBuilder = new QueryBuilder();
+        configure(childBuilder);
+        if (childBuilder._filters.Count == 0)
+            throw new ArgumentException("A filter group must contain at least one filter.", nameof(configure));
+
+        _filters.Add(new FilterNode
         {
-            null => "",
-            DateTime dt => HttpUtility.UrlEncode(dt.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)),
-            DateTimeOffset dto => HttpUtility.UrlEncode(dto.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)),
-            bool b => b ? "1" : "0",
-            _ => HttpUtility.UrlEncode(value.ToString() ?? "")
-        };
+            Logic = logic,
+            Children = childBuilder._filters.Select(filter => filter.Clone()).ToList()
+        });
+        return this;
     }
+
+    private void AppendFilters(List<string> parts)
+    {
+        if (_filters.Count == 0)
+            return;
+
+        if (_filters.All(filter => !filter.IsGroup))
+        {
+            for (var i = 0; i < _filters.Count; i++)
+                AppendFilterNode(parts, $"filter[{i}]", _filters[i]);
+            return;
+        }
+
+        if (_filters.Count == 1 && _filters[0].IsGroup)
+        {
+            AppendFilterGroup(parts, "filter", _filters[0]);
+            return;
+        }
+
+        parts.Add("filter[logic]=and");
+        for (var i = 0; i < _filters.Count; i++)
+            AppendFilterNode(parts, $"filter[filters][{i}]", _filters[i]);
+    }
+
+    private static void AppendFilterNode(List<string> parts, string prefix, FilterNode node)
+    {
+        if (node.IsGroup)
+        {
+            AppendFilterGroup(parts, prefix, node);
+            return;
+        }
+
+        parts.Add($"{prefix}[field]={Encode(node.Field!)}");
+        parts.Add($"{prefix}[operator]={Encode(node.Operator!)}");
+        AppendParameter(parts, $"{prefix}[value]", node.Value);
+    }
+
+    private static void AppendFilterGroup(List<string> parts, string prefix, FilterNode group)
+    {
+        parts.Add($"{prefix}[logic]={group.Logic}");
+        for (var i = 0; i < group.Children.Count; i++)
+            AppendFilterNode(parts, $"{prefix}[filters][{i}]", group.Children[i]);
+    }
+
+    private static void AppendParameter(List<string> parts, string key, object? value)
+    {
+        if (value is null)
+        {
+            parts.Add($"{key}=");
+            return;
+        }
+
+        if (value is IDictionary dictionary)
+        {
+            foreach (DictionaryEntry item in dictionary)
+                AppendParameter(parts, $"{key}[{Encode(Convert.ToString(item.Key, CultureInfo.InvariantCulture) ?? string.Empty)}]", item.Value);
+            return;
+        }
+
+        if (value is IEnumerable enumerable and not string)
+        {
+            var index = 0;
+            foreach (var item in enumerable)
+            {
+                AppendParameter(parts, $"{key}[{index}]", item);
+                index++;
+            }
+            return;
+        }
+
+        parts.Add($"{key}={FormatValue(value)}");
+    }
+
+    private static string FormatValue(object value) => value switch
+    {
+        DateTime date => Encode(date.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)),
+        DateTimeOffset date => Encode(date.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)),
+        bool boolean => boolean ? "1" : "0",
+        IFormattable formattable => Encode(formattable.ToString(null, CultureInfo.InvariantCulture) ?? string.Empty),
+        _ => Encode(value.ToString() ?? string.Empty)
+    };
+
+    private static object? CloneValue(object? value)
+    {
+        if (value is null or string || value.GetType().IsValueType)
+            return value;
+
+        if (value is IDictionary dictionary)
+        {
+            var clone = new Dictionary<string, object?>(StringComparer.Ordinal);
+            foreach (DictionaryEntry item in dictionary)
+            {
+                var key = Convert.ToString(item.Key, CultureInfo.InvariantCulture) ?? string.Empty;
+                clone[key] = CloneValue(item.Value);
+            }
+            return clone;
+        }
+
+        if (value is IEnumerable enumerable)
+            return enumerable.Cast<object?>().Select(CloneValue).ToList();
+
+        // Arbitrary objects are treated as immutable scalar parameter values.
+        return value;
+    }
+
+    private static string Encode(string value) => HttpUtility.UrlEncode(value);
 }

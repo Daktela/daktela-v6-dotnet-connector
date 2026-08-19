@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Daktela.Connector.Serialization;
 
 namespace Daktela.Connector.Exceptions;
 
@@ -24,6 +25,16 @@ public class DaktelaValidationException : DaktelaException
         ValidationErrors = validationErrors;
     }
 
+    public DaktelaValidationException(
+        string message,
+        IReadOnlyList<DaktelaError> errors,
+        int statusCode = 400,
+        string? responseBody = null)
+        : base(message, statusCode, responseBody, errors)
+    {
+        ValidationErrors = DaktelaJson.ToValidationErrors(errors);
+    }
+
     public DaktelaValidationException(string message, string? responseBody, int statusCode = 400)
         : base(message, statusCode, responseBody)
     {
@@ -37,31 +48,8 @@ public class DaktelaValidationException : DaktelaException
 
         try
         {
-            var json = JsonDocument.Parse(responseBody);
-            if (json.RootElement.TryGetProperty("errors", out var errorsElement))
-            {
-                var errors = new Dictionary<string, List<string>>();
-                foreach (var prop in errorsElement.EnumerateObject())
-                {
-                    var fieldErrors = new List<string>();
-                    if (prop.Value.ValueKind == JsonValueKind.Array)
-                    {
-                        foreach (var error in prop.Value.EnumerateArray())
-                        {
-                            if (error.ValueKind == JsonValueKind.String)
-                            {
-                                fieldErrors.Add(error.GetString() ?? string.Empty);
-                            }
-                        }
-                    }
-                    else if (prop.Value.ValueKind == JsonValueKind.String)
-                    {
-                        fieldErrors.Add(prop.Value.GetString() ?? string.Empty);
-                    }
-                    errors[prop.Name] = fieldErrors;
-                }
-                return errors;
-            }
+            using var json = JsonDocument.Parse(responseBody);
+            return DaktelaJson.ToValidationErrors(DaktelaJson.ParseErrors(json.RootElement));
         }
         catch (JsonException)
         {

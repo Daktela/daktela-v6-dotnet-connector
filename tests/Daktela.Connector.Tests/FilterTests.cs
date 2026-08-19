@@ -125,4 +125,16 @@ public class FilterTests
         var values = (object[])filter.Value;
         Assert.Equal(2, values.Length);
     }
+
+    [Fact]
+    public void StringAndNullHelpers_CreateCorrectFilters()
+    {
+        Assert.Equal(FilterOperator.Contains, Filter.Contains("name", "doe").Operator);
+        Assert.Equal(FilterOperator.StartsWith, Filter.StartsWith("name", "j").Operator);
+        Assert.Equal(FilterOperator.EndsWith, Filter.EndsWith("name", "e").Operator);
+        Assert.Equal(FilterOperator.NotLike, Filter.NotLike("name", "%bot%").Operator);
+        Assert.Equal(FilterOperator.DoesNotContain, Filter.DoesNotContain("name", "bot").Operator);
+        Assert.Equal(FilterOperator.IsNull, Filter.IsNull("deleted").Operator);
+        Assert.Equal(FilterOperator.IsNotNull, Filter.IsNotNull("created").Operator);
+    }
 }

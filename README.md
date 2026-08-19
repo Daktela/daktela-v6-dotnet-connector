@@ -1,6 +1,15 @@
 # Daktela V6 .NET Connector
 
-Official .NET connector for the Daktela V6 API.
+A typed .NET client for the Daktela V6 API. The connector handles the `/api/v6/`
+base path, Daktela response envelopes, query encoding, pagination, date/time values,
+structured API errors, cancellation, and optional retries.
+
+Protocol details are documented in the
+[Daktela V6 API reference](https://customer.daktela.com/external/apihelp/v6/).
+
+## Requirements
+
+- .NET 8 or later (the package contains .NET 8 and .NET 10 targets)
 
 ## Installation
 
@@ -8,207 +17,183 @@ Official .NET connector for the Daktela V6 API.
 dotnet add package Daktela.Connector
 ```
 
-## Quick Start
+## Quick start
 
 ```csharp
 using Daktela.Connector;
 using Daktela.Connector.Query;
 
-// Create a client
 var config = new DaktelaConfig
 {
-    InstanceUrl = "your-instance.daktela.com",
+    // A host URL or a URL ending in /api/v6 are both accepted.
+    InstanceUrl = "https://your-instance.daktela.com",
     AccessToken = "your-access-token"
 };
 
 using var client = new DaktelaClient(config);
 
-// Check connection
 if (await client.PingAsync())
 {
-    Console.WriteLine("Connected to Daktela API");
+    var query = new QueryBuilder()
+        .Fields("name", "email", "created")
+        .Filter("status", FilterOperator.Eq, "active")
+        .Sort("created", SortDirection.Desc)
+        .Take(50);
+
+    var response = await client.GetAsync<User>("users", query);
+    foreach (var user in response.Data ?? [])
+        Console.WriteLine(user.Name);
 }
 ```
 
-## Configuration Options
+Endpoint names are relative to the Daktela API root. Pass `users` or `users.json`,
+not a full URL; the connector adds `.json` and `/api/v6/` as needed.
+
+## Configuration
 
 ```csharp
+using Daktela.Connector.Http;
+
 var config = new DaktelaConfig
 {
-    // Required
-    InstanceUrl = "your-instance.daktela.com",
+    InstanceUrl = "https://your-instance.daktela.com/api/v6/",
     AccessToken = "your-access-token",
-
-    // Optional
-    AuthMethod = AuthMethod.Header,          // Header (default), QueryParam, or Cookie
-    Timeout = TimeSpan.FromSeconds(30),      // Request timeout
-    VerifySsl = true,                        // SSL certificate verification
-    RetryPolicy = RetryPolicy.Default        // Retry with exponential backoff
+    AuthMethod = AuthMethod.Header,
+    Timeout = TimeSpan.FromSeconds(30),
+    VerifySsl = true,
+    RetryPolicy = RetryPolicy.Default
 };
 ```
 
-### Authentication Methods
+The authentication methods are:
 
-The connector supports three authentication methods:
+- `Header` (default): `X-AUTH-TOKEN: {token}`
+- `QueryParam`: `?accessToken={token}`
+- `Cookie`: `Cookie: c_user={token}`
+
+Keep `VerifySsl` enabled in production. It applies when the connector creates its
+own HTTP transport.
+
+### HttpClientFactory and dependency injection
+
+Supply a managed `HttpClient` when your application already uses
+`IHttpClientFactory`. The caller retains ownership, so disposing the Daktela client
+does not dispose the supplied HTTP client.
 
 ```csharp
-// Header authentication (recommended)
-config.AuthMethod = AuthMethod.Header;    // X-AUTH-TOKEN: {token}
-
-// Query parameter authentication
-config.AuthMethod = AuthMethod.QueryParam; // ?accessToken={token}
-
-// Cookie authentication
-config.AuthMethod = AuthMethod.Cookie;     // Cookie: c_user={token}
+var httpClient = httpClientFactory.CreateClient("daktela");
+using var client = new DaktelaClient(config, httpClient);
 ```
 
-## CRUD Operations
+`DaktelaConfig.Timeout` still applies to an injected client.
 
-### Get a Single Record
-
-```csharp
-var response = await client.GetAsync<User>("users", "john.doe");
-
-if (response.IsSuccess)
-{
-    Console.WriteLine($"User: {response.Data.Name}");
-}
-```
-
-### Get Multiple Records
+## CRUD operations
 
 ```csharp
-var response = await client.GetAsync<User>("users");
+// One record: GET /api/v6/users/john.doe.json
+var one = await client.GetAsync<User>("users", "john.doe");
 
-foreach (var user in response.Data)
-{
-    Console.WriteLine($"User: {user.Name}");
-}
+// A list: GET /api/v6/users.json
+var users = await client.GetAsync<User>("users");
+Console.WriteLine($"Returned: {users.Data?.Count}, total: {users.Total}");
 
-Console.WriteLine($"Total users: {response.Total}");
-```
-
-### Create a Record
-
-```csharp
-var newContact = new
+var created = await client.PostAsync<Contact>("contacts", new
 {
     firstname = "John",
     lastname = "Doe",
     email = "john.doe@example.com"
-};
+});
 
-var response = await client.PostAsync<Contact>("contacts", newContact);
-
-if (response.IsSuccess)
-{
-    Console.WriteLine($"Created contact: {response.Data.Name}");
-}
-```
-
-### Update a Record
-
-```csharp
-var updates = new
+var updated = await client.PutAsync<Contact>("contacts", "12345", new
 {
     email = "john.updated@example.com"
-};
+});
 
-var response = await client.PutAsync<Contact>("contacts", "12345", updates);
+var deleted = await client.DeleteAsync("contacts", "12345");
 ```
 
-### Delete a Record
+`PostAsync`, `PutAsync`, and `DeleteAsync` also accept a `QueryBuilder` before the
+cancellation token when an endpoint needs query options.
 
-```csharp
-var response = await client.DeleteAsync("contacts", "12345");
+## Query builder
 
-if (response.IsSuccess)
-{
-    Console.WriteLine("Contact deleted");
-}
-```
-
-## Query Builder
-
-The fluent query builder allows you to construct complex queries:
-
-### Field Selection
-
-```csharp
-var query = new QueryBuilder()
-    .Fields("name", "email", "phone", "created");
-
-var response = await client.GetAsync<User>("users", query);
-```
-
-### Filtering
-
-```csharp
-var query = new QueryBuilder()
-    .Filter("status", FilterOperator.Eq, "active")
-    .Filter("created", FilterOperator.Gte, DateTime.Today.AddDays(-7))
-    .Filter("role", FilterOperator.In, "admin", "manager");
-
-var response = await client.GetAsync<User>("users", query);
-```
-
-Available filter operators:
-- `Eq` - Equal
-- `Neq` - Not equal
-- `Gt` - Greater than
-- `Gte` - Greater than or equal
-- `Lt` - Less than
-- `Lte` - Less than or equal
-- `Like` - Pattern matching (SQL LIKE)
-- `In` - Value in list
-- `NotIn` - Value not in list
-
-### Sorting
-
-```csharp
-var query = new QueryBuilder()
-    .Sort("created", SortDirection.Desc)
-    .Sort("name", SortDirection.Asc);
-
-var response = await client.GetAsync<User>("users", query);
-```
-
-### Pagination
-
-```csharp
-var query = new QueryBuilder()
-    .Skip(0)
-    .Take(50);
-
-var response = await client.GetAsync<User>("users", query);
-```
-
-### Complete Example
+### Fields, filters, sorting, and pagination
 
 ```csharp
 var query = new QueryBuilder()
     .Fields("name", "email", "status", "created")
     .Filter("status", FilterOperator.Eq, "active")
     .Filter("created", FilterOperator.Gte, DateTime.Today.AddMonths(-1))
+    .Filter("role", FilterOperator.In, new[] { "admin", "manager" })
     .Sort("created", SortDirection.Desc)
+    .Skip(0)
     .Take(100);
 
 var response = await client.GetAsync<User>("users", query);
 ```
 
-### Using Filter Helper Methods
+Supported operators are `Eq`, `Neq`, `Gt`, `Gte`, `Lt`, `Lte`, `Like`,
+`Contains`, `StartsWith`, `EndsWith`, `NotLike`, `DoesNotContain`, `IsNull`,
+`IsNotNull`, `In`, and `NotIn`. A string overload is also available for operators
+introduced by newer server versions:
+
+```csharp
+query.Filter("custom_field", "future_operator", "value");
+```
+
+Filter helpers provide the same typed operators:
 
 ```csharp
 var query = new QueryBuilder()
     .Filter(Filter.Eq("status", "active"))
-    .Filter(Filter.Gte("age", 18))
     .Filter(Filter.Like("name", "%john%"))
-    .Filter(Filter.In("role", "admin", "manager", "user"));
+    .Filter(Filter.In("role", "admin", "manager"));
 ```
 
-## Automatic Pagination with IAsyncEnumerable
+### AND and OR groups
 
-For large datasets, use `IterateAsync` to automatically handle pagination:
+Top-level filters use AND logic. Use groups for explicit nested logic:
+
+```csharp
+var query = new QueryBuilder()
+    .Filter("active", FilterOperator.Eq, true)
+    .OrFilter(or => or
+        .Filter("team", FilterOperator.Eq, "sales")
+        .Filter("team", FilterOperator.Eq, "support"));
+```
+
+`AndFilter` is available for nested AND groups.
+
+### Arbitrary query parameters
+
+Use `Parameter` for endpoint-specific options. Dictionaries and collections are
+encoded with Daktela/PHP bracket notation.
+
+```csharp
+var query = new QueryBuilder()
+    .Parameter("custom", "value")
+    .Parameter("options", new Dictionary<string, object?>
+    {
+        ["active"] = true,
+        ["ids"] = new[] { 10, 20 }
+    });
+
+var typed = await client.GetAsync<User>("users", query);
+```
+
+For an endpoint without a known response model, pass a parameter dictionary to the
+untyped overload. Its data is returned as a detached `JsonElement`:
+
+```csharp
+var raw = await client.GetAsync("custom/action", new Dictionary<string, object?>
+{
+    ["custom"] = "value"
+});
+
+var property = raw.Data.GetProperty("property").GetString();
+```
+
+## Automatic pagination
 
 ```csharp
 var query = new QueryBuilder()
@@ -216,159 +201,135 @@ var query = new QueryBuilder()
     .Sort("created", SortDirection.Desc);
 
 await foreach (var user in client.IterateAsync<User>("users", query, pageSize: 100))
-{
-    Console.WriteLine($"Processing user: {user.Name}");
-}
+    Console.WriteLine(user.Name);
 ```
 
-## Retry Policy
+`IterateAsync` respects an existing `Skip` and `Take`, stops at the response total,
+and accepts a cancellation token.
 
-Configure automatic retries with exponential backoff:
+## JSON and Daktela date/time values
+
+The client reads both ISO 8601 values and Daktela's `yyyy-MM-dd HH:mm:ss` format.
+It writes `DateTime` and `DateTimeOffset` values in Daktela format. Property names
+are matched case-insensitively and request properties default to camel case.
+
+You can supply serializer options; the connector copies them and adds its Daktela
+converters:
 
 ```csharp
-var config = new DaktelaConfig
+config.JsonSerializerOptions = new JsonSerializerOptions
 {
-    InstanceUrl = "your-instance.daktela.com",
-    AccessToken = "your-access-token",
-    RetryPolicy = new RetryPolicy
-    {
-        MaxRetries = 3,
-        InitialDelay = TimeSpan.FromSeconds(1),
-        MaxDelay = TimeSpan.FromSeconds(30),
-        BackoffMultiplier = 2.0
-    }
+    PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower
 };
 ```
 
-Or use the built-in defaults:
+## Retry behavior
 
 ```csharp
-config.RetryPolicy = RetryPolicy.Default;  // 3 retries with exponential backoff
-config.RetryPolicy = RetryPolicy.NoRetry;  // Disable retries
+config.RetryPolicy = new RetryPolicy
+{
+    MaxRetries = 3,
+    InitialDelay = TimeSpan.FromSeconds(1),
+    MaxDelay = TimeSpan.FromSeconds(30),
+    BackoffMultiplier = 2.0,
+    RetryOnTimeout = true
+};
 ```
 
-## Error Handling
-
-The connector throws specific exceptions for different error conditions:
+Retries honor `Retry-After` for rate limits and cap it at `MaxDelay`. GET, HEAD,
+and OPTIONS may be retried. POST, PUT, DELETE, and other potentially unsafe methods
+are not retried by default, which prevents accidental duplicate writes. Only enable
+`RetryUnsafeHttpMethods` if your operation is idempotent or uses an idempotency key.
 
 ```csharp
+config.RetryPolicy.RetryUnsafeHttpMethods = true;
+```
+
+Use `RetryPolicy.NoRetry` or leave `RetryPolicy` null to disable retries.
+
+## Error handling
+
+Non-success HTTP responses throw typed exceptions. Both Daktela's singular `error`
+and plural `errors` payloads are parsed into `DaktelaException.Errors`.
+
+```csharp
+using Daktela.Connector.Exceptions;
+
 try
 {
-    var response = await client.GetAsync<User>("users", "non-existent");
+    await client.GetAsync<User>("users", "non-existent");
 }
-catch (DaktelaUnauthorizedException ex)
+catch (DaktelaUnauthorizedException)
 {
-    // HTTP 401 - Invalid or expired access token
-    Console.WriteLine("Authentication failed");
+    // HTTP 401
 }
-catch (DaktelaNotFoundException ex)
+catch (DaktelaNotFoundException)
 {
-    // HTTP 404 - Resource not found
-    Console.WriteLine("User not found");
+    // HTTP 404
 }
 catch (DaktelaRateLimitException ex)
 {
-    // HTTP 429 - Rate limit exceeded
-    Console.WriteLine($"Rate limited. Retry after: {ex.RetryAfter}");
+    Console.WriteLine($"Retry after: {ex.RetryAfter}");
 }
 catch (DaktelaValidationException ex)
 {
-    // HTTP 400/422 - Validation errors
-    foreach (var (field, errors) in ex.ValidationErrors)
-    {
-        Console.WriteLine($"{field}: {string.Join(", ", errors)}");
-    }
+    // HTTP 400 or 422. Non-field errors use the _global key.
+    foreach (var (field, messages) in ex.ValidationErrors)
+        Console.WriteLine($"{field}: {string.Join(", ", messages)}");
 }
-catch (DaktelaTimeoutException ex)
+catch (DaktelaTimeoutException)
 {
-    // Request timed out
-    Console.WriteLine("Request timed out");
+    // The configured request timeout elapsed.
 }
 catch (DaktelaConnectionException ex)
 {
-    // Network connection error
-    Console.WriteLine($"Connection error: {ex.Message}");
+    Console.WriteLine(ex.Message);
 }
 catch (DaktelaException ex)
 {
-    // Other API errors
-    Console.WriteLine($"API error {ex.StatusCode}: {ex.Message}");
+    Console.WriteLine($"HTTP {ex.StatusCode}: {ex.Message}");
+    Console.WriteLine(ex.ResponseBody);
 }
 ```
 
-## Response Object
+Successful calls return `DaktelaResponse<T>`, containing `Data`, `Total`,
+`StatusCode`, `IsSuccess`, `Errors`, and the original `RawResponse`.
 
-All API methods return a `DaktelaResponse<T>` object:
+## Cancellation
 
 ```csharp
-var response = await client.GetAsync<User>("users");
-
-// Check if request was successful (2xx status code)
-if (response.IsSuccess)
-{
-    // Access the data
-    var users = response.Data;
-
-    // Total count (for list responses)
-    var total = response.Total;
-}
-else
-{
-    // Access errors
-    var errors = response.Errors;
-}
-
-// HTTP status code
-var statusCode = response.StatusCode;
-
-// Raw JSON response
-var rawJson = response.RawResponse;
+using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+var response = await client.GetAsync<User>(
+    "users",
+    cancellationToken: cancellation.Token);
 ```
 
-## Model Classes
+Caller cancellation remains an `OperationCanceledException`; expiration of the
+configured request timeout throws `DaktelaTimeoutException`.
 
-Define your own model classes to deserialize API responses:
+## Models
+
+Define models matching the fields returned by your Daktela instance:
 
 ```csharp
-public class User
+public sealed class User
 {
-    public string Name { get; set; }
-    public string Email { get; set; }
-    public string Status { get; set; }
+    public string? Name { get; set; }
+    public string? Email { get; set; }
+    public string? Status { get; set; }
     public DateTime Created { get; set; }
 }
 
-public class Contact
+public sealed class Contact
 {
-    public string Name { get; set; }
-    public string Firstname { get; set; }
-    public string Lastname { get; set; }
-    public string Email { get; set; }
-    public string Phone { get; set; }
+    public string? Name { get; set; }
+    public string? Firstname { get; set; }
+    public string? Lastname { get; set; }
+    public string? Email { get; set; }
+    public string? Phone { get; set; }
 }
 ```
-
-## Cancellation Support
-
-All async methods support cancellation tokens:
-
-```csharp
-var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-
-try
-{
-    var response = await client.GetAsync<User>("users", cancellationToken: cts.Token);
-}
-catch (OperationCanceledException)
-{
-    Console.WriteLine("Operation was cancelled");
-}
-```
-
-## Requirements
-
-- .NET 8.0 or later
 
 ## License
 
-MIT License
+[MIT](LICENSE)

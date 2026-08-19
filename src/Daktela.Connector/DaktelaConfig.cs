@@ -1,4 +1,5 @@
 using Daktela.Connector.Http;
+using System.Text.Json;
 
 namespace Daktela.Connector;
 
@@ -38,11 +39,26 @@ public class DaktelaConfig
     public RetryPolicy? RetryPolicy { get; set; }
 
     /// <summary>
+    /// Optional JSON serializer settings. The connector copies these settings and adds
+    /// converters for Daktela date/time values.
+    /// </summary>
+    public JsonSerializerOptions? JsonSerializerOptions { get; set; }
+
+    /// <summary>
     /// Gets the base URL for API requests.
     /// </summary>
     internal string GetBaseUrl()
     {
         var url = InstanceUrl.Trim();
+
+        if (Uri.TryCreate(url, UriKind.Absolute, out var suppliedUri) &&
+            suppliedUri.Scheme != Uri.UriSchemeHttp &&
+            suppliedUri.Scheme != Uri.UriSchemeHttps)
+        {
+            throw new ArgumentException(
+                "Instance URL must use the HTTP or HTTPS scheme.",
+                nameof(InstanceUrl));
+        }
 
         if (!url.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
             !url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
@@ -50,6 +66,24 @@ public class DaktelaConfig
             url = "https://" + url;
         }
 
-        return url.TrimEnd('/') + "/api/v6";
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
+            (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+            throw new ArgumentException("Instance URL must be a valid HTTP or HTTPS URL.", nameof(InstanceUrl));
+
+        if (!string.IsNullOrEmpty(uri.Query) || !string.IsNullOrEmpty(uri.Fragment))
+            throw new ArgumentException("Instance URL cannot contain a query string or fragment.", nameof(InstanceUrl));
+
+        var path = uri.AbsolutePath.TrimEnd('/');
+        if (!path.EndsWith("/api/v6", StringComparison.OrdinalIgnoreCase))
+            path += "/api/v6";
+
+        var builder = new UriBuilder(uri)
+        {
+            Path = path + "/",
+            Query = string.Empty,
+            Fragment = string.Empty
+        };
+
+        return builder.Uri.AbsoluteUri;
     }
 }
