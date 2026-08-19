@@ -47,3 +47,7 @@ jobs:
 
       - name: Push to NuGet
         run: dotnet nuget push ./nupkg/*.nupkg --api-key ${{ steps.nuget-login.outputs.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+
+      - name: Unlist superseded 1.0.2 release
+        if: steps.version.outputs.VERSION == '1.1.0'
+        run: dotnet nuget delete Daktela.Connector 1.0.2 --api-key ${{ steps.nuget-login.outputs.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --non-interactive

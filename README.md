@@ -17,6 +17,34 @@ Protocol details are documented in the
 dotnet add package Daktela.Connector
 ```
 
+## Upgrading from 1.0.1
+
+Version 1.1.0 does not intentionally remove or rename public API members, but it
+corrects several behaviors that applications may have worked around. Review these
+changes before upgrading:
+
+- `InstanceUrl` is treated as the Daktela host or API root, and requests always use
+  the fixed `/api/v6/` base path.
+- Daktela response envelopes are unwrapped from `result.data`; the nested `total`
+  value is also exposed through `DaktelaResponse.Total`.
+- A successful HTTP response containing malformed or incompatible JSON now throws
+  `DaktelaException` instead of silently returning an empty/default result.
+- GET, HEAD, and OPTIONS can be retried. POST, PUT, DELETE, and other unsafe methods
+  are no longer retried unless `RetryUnsafeHttpMethods` is explicitly enabled.
+- Endpoint arguments must be relative endpoint paths and cannot contain a query
+  string. Add query values with `QueryBuilder` or its `Parameter` method.
+- Configuration and endpoint validation is stricter, so invalid URLs, timeouts,
+  retry settings, record identifiers, and path traversal fail before a request is
+  sent.
+- Query encoding now uses Daktela's `dir` sort key, lowercase `notin` operator, and
+  bracket notation for nested AND/OR filters and structured parameters.
+- Daktela date/time strings without an offset represent the Daktela server's local
+  time and deserialize with `DateTimeKind.Unspecified`; they are not converted to
+  UTC automatically.
+
+If an application depended on one of the previous behaviors, update that code when
+moving from 1.0.1 to 1.1.0.
+
 ## Quick start
 
 ```csharp
@@ -212,6 +240,8 @@ and accepts a cancellation token.
 The client reads both ISO 8601 values and Daktela's `yyyy-MM-dd HH:mm:ss` format.
 It writes `DateTime` and `DateTimeOffset` values in Daktela format. Property names
 are matched case-insensitively and request properties default to camel case.
+Daktela values without an explicit offset are server-local wall-clock values and
+deserialize with `DateTimeKind.Unspecified`.
 
 You can supply serializer options; the connector copies them and adds its Daktela
 converters:
@@ -332,4 +362,4 @@ public sealed class Contact
 
 ## License
 
-[MIT](LICENSE)
+[MIT](https://github.com/Daktela/daktela-v6-dotnet-connector/blob/main/LICENSE)

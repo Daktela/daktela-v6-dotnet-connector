@@ -8,7 +8,7 @@
 
     <!-- NuGet Package Metadata -->
     <PackageId>Daktela.Connector</PackageId>
-    <Version>1.0.2</Version>
+    <Version>1.1.0</Version>
     <Authors>Daktela</Authors>
     <Company>Daktela</Company>
     <Description>Typed .NET client for the Daktela V6 API with filtering, pagination, retries, and structured errors.</Description>
@@ -18,6 +18,7 @@
     <RepositoryUrl>https://github.com/Daktela/daktela-v6-dotnet-connector</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageReleaseNotes>Corrects Daktela V6 response parsing, query encoding, date/time handling, endpoint validation, and retry safety. See the README upgrade notes for behavior changes from 1.0.1.</PackageReleaseNotes>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
 
     <!-- Enable XML documentation -->
