@@ -1,8 +1,9 @@
 # Daktela V6 .NET Connector
 
 A typed .NET client for the Daktela V6 API. The connector handles the `/api/v6/`
-base path, Daktela response envelopes, query encoding, pagination, date/time values,
-structured API errors, cancellation, and optional retries.
+base path, Daktela response envelopes, canonical query encoding, pagination,
+date/time values, structured API errors, cancellation, retries, rate limits, and
+authenticated health checks.
 
 Protocol details are documented in the
 [Daktela V6 API reference](https://customer.daktela.com/external/apihelp/v6/).
@@ -16,6 +17,23 @@ Protocol details are documented in the
 ```bash
 dotnet add package Daktela.Connector
 ```
+
+## Upgrading from 1.1.0
+
+Version 1.2.0 substantially expands the connector without removing or renaming
+existing .NET members. Two corrected wire behaviors are worth checking if your
+application worked around them:
+
+- Filters now always use Daktela's canonical
+  `filter[logic]` / `filter[filters][n]` structure, including a single filter.
+- The first character of an endpoint is lowercased, matching the Daktela examples
+  (`CampaignsRecords` becomes `campaignsRecords`).
+
+The release also adds untyped POST/PUT results, combined-path PUT/DELETE overloads,
+reusable paginator helpers, detailed health checks, dedicated rate-limit handling,
+connection-retry control, a User-Agent suffix, response helpers, and phone-number
+normalization. The connector retains async streams, typed DTOs, cancellation, and
+`HttpClient` ownership conventions throughout the expanded API.
 
 ## Upgrading from 1.0.1
 
@@ -89,7 +107,9 @@ var config = new DaktelaConfig
     AuthMethod = AuthMethod.Header,
     Timeout = TimeSpan.FromSeconds(30),
     VerifySsl = true,
-    RetryPolicy = RetryPolicy.Default
+    RetryPolicy = RetryPolicy.Default,
+    RateLimitPolicy = new RateLimitPolicy(),
+    UserAgentSuffix = "MyApplication/2.0"
 };
 ```
 
@@ -140,8 +160,21 @@ var updated = await client.PutAsync<Contact>("contacts", "12345", new
 var deleted = await client.DeleteAsync("contacts", "12345");
 ```
 
+Response DTOs are optional for writes. Combined relative paths match the style used
+by Daktela's API examples:
+
+```csharp
+var rawCreated = await client.PostAsync("contacts", new { name = "John Doe" });
+var newName = rawCreated.Data.GetProperty("name").GetString();
+
+var rawUpdated = await client.PutAsync("contacts/12345", new { email = "new@example.com" });
+var removed = await client.DeleteAsync("contacts/12345");
+```
+
 `PostAsync`, `PutAsync`, and `DeleteAsync` also accept a `QueryBuilder` before the
-cancellation token when an endpoint needs query options.
+cancellation token when an endpoint needs query options. The split endpoint/ID PUT
+and DELETE overloads URI-escape the ID; a combined path is treated as an already
+structured relative API path.
 
 ## Query builder
 
@@ -195,7 +228,7 @@ var query = new QueryBuilder()
 ### Arbitrary query parameters
 
 Use `Parameter` for endpoint-specific options. Dictionaries and collections are
-encoded with Daktela/PHP bracket notation.
+encoded with Daktela bracket notation.
 
 ```csharp
 var query = new QueryBuilder()
@@ -232,8 +265,51 @@ await foreach (var user in client.IterateAsync<User>("users", query, pageSize: 1
     Console.WriteLine(user.Name);
 ```
 
-`IterateAsync` respects an existing `Skip` and `Take`, stops at the response total,
-and accepts a cancellation token.
+`IterateAsync` respects an existing `Skip` and `Take`, handles Daktela instances
+that cap pages below the requested size, stops at the response total, and accepts a
+cancellation token. Unbounded reads have a 999-page safety limit.
+
+For reusable collection and page helpers, create a paginator:
+
+```csharp
+var paginator = client.Paginate<User>(
+    "users",
+    query,
+    pageSize: 100,
+    maxItems: 1_000,
+    stopOnError: true);
+
+var users = await paginator.ToListAsync();
+var count = await paginator.CountAsync();
+var first = await paginator.FirstOrDefaultAsync();
+var empty = await paginator.IsEmptyAsync();
+
+await paginator.ForEachAsync((user, index) => Console.WriteLine($"{index}: {user.Name}"));
+
+await foreach (var active in paginator.Filter(user => user.Status == "active"))
+    Console.WriteLine(active.Name);
+
+await foreach (var name in paginator.Map(user => user.Name))
+    Console.WriteLine(name);
+
+await foreach (var page in paginator.PagesAsync())
+    Console.WriteLine($"Page returned {page.Data?.Count}; total {page.Total}");
+```
+
+`ToArrayAsync`, `FirstAsync`, and `EachAsync` are convenience aliases. Each
+enumeration performs a fresh set of requests; paginator results are not cached.
+
+## Health checks
+
+`PingAsync` returns a simple boolean. `HealthCheckAsync` returns authenticated
+status, latency, HTTP status (when available), and an error description:
+
+```csharp
+var health = await client.HealthCheckAsync(cancellationToken);
+Console.WriteLine($"Healthy: {health.Healthy}; latency: {health.Latency.TotalMilliseconds:N0} ms");
+```
+
+Caller cancellation is propagated rather than converted into an unhealthy result.
 
 ## JSON and Daktela date/time values
 
@@ -262,7 +338,8 @@ config.RetryPolicy = new RetryPolicy
     InitialDelay = TimeSpan.FromSeconds(1),
     MaxDelay = TimeSpan.FromSeconds(30),
     BackoffMultiplier = 2.0,
-    RetryOnTimeout = true
+    RetryOnTimeout = true,
+    RetryOnConnectionError = true
 };
 ```
 
@@ -276,6 +353,27 @@ config.RetryPolicy.RetryUnsafeHttpMethods = true;
 ```
 
 Use `RetryPolicy.NoRetry` or leave `RetryPolicy` null to disable retries.
+`RetryPolicy.Aggressive` provides a high-resilience preset.
+
+### Dedicated rate-limit handling
+
+Use `RateLimitPolicy` when HTTP 429 responses should follow `Retry-After`
+independently from ordinary transient-failure retries:
+
+```csharp
+config.RateLimitPolicy = new RateLimitPolicy
+{
+    AutoRetry = true,
+    MaxRetries = 3,
+    MaxWait = TimeSpan.FromSeconds(60),
+    DefaultWait = TimeSpan.FromSeconds(5)
+};
+```
+
+Configuring this policy explicitly permits a rate-limited POST/PUT/DELETE to be
+retried. Only enable automatic retry where repeating the write is acceptable. If
+the server's wait exceeds `MaxWait`, or retries are disabled/exhausted,
+`DaktelaRateLimitException` is thrown without sleeping.
 
 ## Error handling
 
@@ -323,7 +421,36 @@ catch (DaktelaException ex)
 ```
 
 Successful calls return `DaktelaResponse<T>`, containing `Data`, `Total`,
-`StatusCode`, `IsSuccess`, `Errors`, and the original `RawResponse`.
+`StatusCode`, `IsSuccess`, `Errors`, and the original `RawResponse`. Convenience
+helpers are exposed as `HasErrors`, `FirstError`, and `IsEmpty`.
+
+## Phone-number normalization
+
+Phone normalization is available under `Daktela.Connector.Utils`:
+
+```csharp
+using Daktela.Connector.Utils;
+
+var international = FormatHelper.GetNormalizedPhoneNumber("773 794 604");
+// 00420773794604
+
+var withPlus = FormatHelper.GetNormalizedPhoneNumber("773794604", plusSign: true);
+// +420773794604
+```
+
+Use `intlPrefix` and `intlLength` for a country other than the Czech Republic.
+
+## Feature coverage
+
+The connector covers typed and raw CRUD, single/list/all and relational paths,
+fields/filters/sorts/additional query parameters, reusable pagination, header/query
+authentication, timeouts, SSL verification, custom HTTP transport, retry and
+rate-limit policies, health checks,
+User-Agent customization, structured responses/errors, and phone formatting.
+
+The API is idiomatic for .NET: direct async methods, `IAsyncEnumerable<T>`, typed
+DTOs, cancellation tokens, and an injected `HttpClient`/delegating-handler pipeline
+for custom transport behavior and standard application logging.
 
 ## Cancellation
 

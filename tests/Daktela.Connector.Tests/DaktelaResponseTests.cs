@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Xunit;
 
 namespace Daktela.Connector.Tests;
@@ -36,6 +37,8 @@ public class DaktelaResponseTests
         Assert.Single(response.Errors);
         Assert.Equal("ERR001", response.Errors[0].Code);
         Assert.Equal("{\"error\": true}", response.RawResponse);
+        Assert.True(response.HasErrors);
+        Assert.Same(errors[0], response.FirstError);
     }
 
     [Fact]
@@ -60,5 +63,21 @@ public class DaktelaResponseTests
         Assert.Null(response.Data);
         Assert.Null(response.Total);
         Assert.True(response.IsSuccess);
+    }
+
+    [Fact]
+    public void ResponseHelpers_HandleEmptyAndErrorStates()
+    {
+        var emptyArray = JsonDocument.Parse("[]").RootElement.Clone();
+        var emptyObject = JsonDocument.Parse("{}").RootElement.Clone();
+
+        Assert.True(new DaktelaResponse<List<string>>(200, []).IsEmpty);
+        Assert.True(new DaktelaResponse<HashSet<string>>(200, []).IsEmpty);
+        Assert.True(new DaktelaResponse<JsonElement>(200, emptyArray).IsEmpty);
+        Assert.True(new DaktelaResponse<JsonElement>(200, emptyObject).IsEmpty);
+        Assert.False(new DaktelaResponse<string>(200, string.Empty).IsEmpty);
+        Assert.False(new DaktelaResponse<HashSet<string>>(200, ["value"]).IsEmpty);
+        Assert.False(new DaktelaResponse(200).HasErrors);
+        Assert.Null(new DaktelaResponse(200).FirstError);
     }
 }

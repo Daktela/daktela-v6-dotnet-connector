@@ -1,6 +1,7 @@
+using System.Diagnostics;
+using System.Globalization;
 using System.Net;
 using System.Runtime.CompilerServices;
-using System.Globalization;
 using System.Text.Json;
 using Daktela.Connector.Exceptions;
 using Daktela.Connector.Http;
@@ -14,6 +15,12 @@ namespace Daktela.Connector;
 /// </summary>
 public class DaktelaClient : IDisposable
 {
+    /// <summary>
+    /// Maximum number of pages read by an unbounded pagination operation.
+    /// Prevents an unbounded pagination operation from making unlimited requests.
+    /// </summary>
+    public const int ReadLimit = 999;
+
     private readonly HttpCommunicator _communicator;
     private readonly JsonSerializerOptions _jsonOptions;
     private bool _disposed;
@@ -59,6 +66,44 @@ public class DaktelaClient : IDisposable
         catch (DaktelaException)
         {
             return false;
+        }
+    }
+
+    /// <summary>
+    /// Checks the authenticated <c>whoim</c> endpoint and returns status and latency details.
+    /// Caller cancellation is propagated.
+    /// </summary>
+    public async Task<DaktelaHealthCheck> HealthCheckAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        try
+        {
+            using var response = await _communicator.SendAsync(
+                HttpMethod.Get,
+                "whoim.json",
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            stopwatch.Stop();
+            return new DaktelaHealthCheck
+            {
+                Healthy = response.IsSuccessStatusCode,
+                Latency = stopwatch.Elapsed,
+                StatusCode = (int)response.StatusCode,
+                Error = response.IsSuccessStatusCode
+                    ? null
+                    : $"Daktela returned HTTP {(int)response.StatusCode}."
+            };
+        }
+        catch (DaktelaException ex)
+        {
+            stopwatch.Stop();
+            return new DaktelaHealthCheck
+            {
+                Healthy = false,
+                Latency = stopwatch.Elapsed,
+                StatusCode = ex.StatusCode,
+                Error = ex.Message
+            };
         }
     }
 
@@ -141,6 +186,34 @@ public class DaktelaClient : IDisposable
     /// <summary>
     /// Creates a new record.
     /// </summary>
+    public Task<DaktelaResponse<JsonElement>> PostAsync(
+        string endpoint,
+        object data,
+        CancellationToken cancellationToken = default)
+        => PostAsync(endpoint, data, null, cancellationToken);
+
+    /// <summary>
+    /// Creates a new record without requiring a response DTO.
+    /// </summary>
+    public async Task<DaktelaResponse<JsonElement>> PostAsync(
+        string endpoint,
+        object data,
+        QueryBuilder? query,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(data);
+        var url = AppendQuery($"{NormalizeEndpoint(endpoint)}.json", query);
+        using var response = await _communicator.SendAsync(
+            HttpMethod.Post,
+            url,
+            data,
+            cancellationToken).ConfigureAwait(false);
+        return await ProcessRawResponseAsync(response, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Creates a new record and deserializes its response.
+    /// </summary>
     public Task<DaktelaResponse<T>> PostAsync<T>(
         string endpoint,
         object data,
@@ -168,6 +241,97 @@ public class DaktelaClient : IDisposable
 
     /// <summary>
     /// Updates an existing record.
+    /// </summary>
+    public Task<DaktelaResponse<JsonElement>> PutAsync(
+        string endpoint,
+        string id,
+        object data,
+        CancellationToken cancellationToken = default)
+        => PutAsync(endpoint, id, data, null, cancellationToken);
+
+    /// <summary>
+    /// Updates an existing record without requiring a response DTO.
+    /// </summary>
+    public async Task<DaktelaResponse<JsonElement>> PutAsync(
+        string endpoint,
+        string id,
+        object data,
+        QueryBuilder? query,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(id))
+            throw new ArgumentException("Record ID cannot be null or empty.", nameof(id));
+        ArgumentNullException.ThrowIfNull(data);
+
+        var url = AppendQuery(
+            $"{NormalizeEndpoint(endpoint)}/{Uri.EscapeDataString(id)}.json",
+            query);
+        using var response = await _communicator.SendAsync(
+            HttpMethod.Put,
+            url,
+            data,
+            cancellationToken).ConfigureAwait(false);
+        return await ProcessRawResponseAsync(response, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Sends a PUT to a complete relative API path such as <c>tickets/1234</c>.
+    /// </summary>
+    public Task<DaktelaResponse<JsonElement>> PutAsync(
+        string endpoint,
+        object data,
+        CancellationToken cancellationToken = default)
+        => PutAsync(endpoint, data, null, cancellationToken);
+
+    /// <summary>
+    /// Sends a PUT to a complete relative API path with optional query parameters.
+    /// </summary>
+    public async Task<DaktelaResponse<JsonElement>> PutAsync(
+        string endpoint,
+        object data,
+        QueryBuilder? query,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(data);
+        var url = AppendQuery($"{NormalizeEndpoint(endpoint)}.json", query);
+        using var response = await _communicator.SendAsync(
+            HttpMethod.Put,
+            url,
+            data,
+            cancellationToken).ConfigureAwait(false);
+        return await ProcessRawResponseAsync(response, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Sends a typed PUT to a complete relative API path such as <c>tickets/1234</c>.
+    /// </summary>
+    public Task<DaktelaResponse<T>> PutAsync<T>(
+        string endpoint,
+        object data,
+        CancellationToken cancellationToken = default)
+        => PutAsync<T>(endpoint, data, null, cancellationToken);
+
+    /// <summary>
+    /// Sends a typed PUT to a complete relative API path with optional query parameters.
+    /// </summary>
+    public async Task<DaktelaResponse<T>> PutAsync<T>(
+        string endpoint,
+        object data,
+        QueryBuilder? query,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(data);
+        var url = AppendQuery($"{NormalizeEndpoint(endpoint)}.json", query);
+        using var response = await _communicator.SendAsync(
+            HttpMethod.Put,
+            url,
+            data,
+            cancellationToken).ConfigureAwait(false);
+        return await ProcessResponseAsync<T>(response, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Updates an existing record and deserializes its response.
     /// </summary>
     public Task<DaktelaResponse<T>> PutAsync<T>(
         string endpoint,
@@ -206,6 +370,23 @@ public class DaktelaClient : IDisposable
     /// </summary>
     public Task<DaktelaResponse> DeleteAsync(
         string endpoint,
+        CancellationToken cancellationToken = default)
+        => DeleteAsync(endpoint, (QueryBuilder?)null, cancellationToken);
+
+    /// <summary>
+    /// Sends DELETE to a complete relative API path such as <c>contacts/john_smith</c>.
+    /// </summary>
+    public Task<DaktelaResponse> DeleteAsync(
+        string endpoint,
+        QueryBuilder? query,
+        CancellationToken cancellationToken = default)
+        => DeletePathAsync(NormalizeEndpoint(endpoint), query, cancellationToken);
+
+    /// <summary>
+    /// Deletes a record identified separately from its model endpoint.
+    /// </summary>
+    public Task<DaktelaResponse> DeleteAsync(
+        string endpoint,
         string id,
         CancellationToken cancellationToken = default)
         => DeleteAsync(endpoint, id, null, cancellationToken);
@@ -222,9 +403,16 @@ public class DaktelaClient : IDisposable
         if (string.IsNullOrWhiteSpace(id))
             throw new ArgumentException("Record ID cannot be null or empty.", nameof(id));
 
-        var url = AppendQuery(
-            $"{NormalizeEndpoint(endpoint)}/{Uri.EscapeDataString(id)}.json",
-            query);
+        var path = $"{NormalizeEndpoint(endpoint)}/{Uri.EscapeDataString(id)}";
+        return await DeletePathAsync(path, query, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<DaktelaResponse> DeletePathAsync(
+        string path,
+        QueryBuilder? query,
+        CancellationToken cancellationToken)
+    {
+        var url = AppendQuery($"{path}.json", query);
         using var response = await _communicator.SendAsync(
             HttpMethod.Delete,
             url,
@@ -258,7 +446,8 @@ public class DaktelaClient : IDisposable
             yield break;
 
         var recordsReturned = 0;
-        while (true)
+        var pageRequests = 0;
+        while (pageRequests++ < ReadLimit)
         {
             var remaining = maxRecords.HasValue ? maxRecords.Value - recordsReturned : int.MaxValue;
             if (remaining <= 0)
@@ -279,14 +468,42 @@ public class DaktelaClient : IDisposable
                     yield break;
             }
 
-            if (response.Data.Count < requestedPageSize)
+            // Daktela defaults a missing envelope total to 1. Treat total as an
+            // authoritative pagination boundary only when it matches the page position.
+            var reachedTotal = response.Total.HasValue &&
+                               skip + response.Data.Count == response.Total.Value;
+            if (reachedTotal)
                 yield break;
-            if (response.Total.HasValue && skip + response.Data.Count >= response.Total.Value)
+            if (!response.Total.HasValue && response.Data.Count < requestedPageSize)
                 yield break;
 
             skip += response.Data.Count;
         }
     }
+
+    /// <summary>
+    /// Creates a reusable paginator with item, page, collection, filtering, and mapping helpers.
+    /// </summary>
+    public DaktelaPaginator<T> Paginate<T>(
+        string endpoint,
+        QueryBuilder? query = null,
+        int pageSize = 100,
+        int? maxItems = null,
+        bool stopOnError = true)
+        => new(this, endpoint, query, pageSize, maxItems, stopOnError);
+
+    /// <summary>
+    /// Iterates over full page responses rather than individual records.
+    /// </summary>
+    public IAsyncEnumerable<DaktelaResponse<List<T>>> IteratePagesAsync<T>(
+        string endpoint,
+        QueryBuilder? query = null,
+        int pageSize = 100,
+        int? maxItems = null,
+        bool stopOnError = true,
+        CancellationToken cancellationToken = default)
+        => Paginate<T>(endpoint, query, pageSize, maxItems, stopOnError)
+            .PagesAsync(cancellationToken);
 
     private async Task<DaktelaResponse<T>> ProcessResponseAsync<T>(
         HttpResponseMessage response,
@@ -377,11 +594,13 @@ public class DaktelaClient : IDisposable
         var data = root;
         var hasData = true;
         int? total = null;
+        var hasResult = false;
 
         if (root.ValueKind == JsonValueKind.Object)
         {
             if (root.TryGetProperty("result", out var result))
             {
+                hasResult = true;
                 data = result;
                 if (result.ValueKind == JsonValueKind.Object)
                 {
@@ -396,6 +615,8 @@ public class DaktelaClient : IDisposable
             }
 
             total ??= ReadTotal(root);
+            if (!total.HasValue && hasResult)
+                total = 1;
         }
 
         return new ParsedBody(document, data, hasData, total, errors);
@@ -537,7 +758,7 @@ public class DaktelaClient : IDisposable
             throw new ArgumentException("Endpoint contains invalid escaping.", nameof(endpoint), ex);
         }
 
-        return path;
+        return char.ToLowerInvariant(path[0]) + path[1..];
     }
 
     private static string AppendQuery(string url, QueryBuilder? query)
@@ -562,6 +783,9 @@ public class DaktelaClient : IDisposable
         if (!Enum.IsDefined(config.AuthMethod))
             throw new ArgumentOutOfRangeException(nameof(config), "Authentication method is invalid.");
         config.RetryPolicy?.Validate();
+        config.RateLimitPolicy?.Validate();
+        if (config.UserAgentSuffix?.Any(char.IsControl) == true)
+            throw new ArgumentException("User-Agent suffix cannot contain control characters.", nameof(config));
         _ = config.GetBaseUrl();
     }
 

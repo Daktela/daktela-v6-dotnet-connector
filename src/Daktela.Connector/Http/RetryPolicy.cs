@@ -50,6 +50,11 @@ public class RetryPolicy
     public bool RetryOnTimeout { get; set; } = true;
 
     /// <summary>
+    /// Whether connection failures should be retried. Default is true.
+    /// </summary>
+    public bool RetryOnConnectionError { get; set; } = true;
+
+    /// <summary>
     /// Creates a default retry policy.
     /// </summary>
     public static RetryPolicy Default => new();
@@ -58,6 +63,17 @@ public class RetryPolicy
     /// Creates a retry policy with no retries.
     /// </summary>
     public static RetryPolicy NoRetry => new() { MaxRetries = 0 };
+
+    /// <summary>
+    /// Creates an aggressive high-resilience policy.
+    /// </summary>
+    public static RetryPolicy Aggressive => new()
+    {
+        MaxRetries = 5,
+        InitialDelay = TimeSpan.FromMilliseconds(50),
+        MaxDelay = TimeSpan.FromSeconds(30),
+        BackoffMultiplier = 2.5
+    };
 
     /// <summary>
     /// Calculates the delay for a given retry attempt using exponential backoff.

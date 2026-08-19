@@ -113,7 +113,7 @@ public class QueryBuilder
 
     /// <summary>
     /// Adds or replaces an arbitrary top-level query parameter.
-    /// Dictionaries and collections are encoded using PHP-style bracket notation.
+    /// Dictionaries and collections are encoded using Daktela bracket notation.
     /// </summary>
     public QueryBuilder Parameter(string name, object? value)
     {
@@ -163,6 +163,12 @@ public class QueryBuilder
     {
         var parts = new List<string>();
 
+        foreach (var parameter in _parameters)
+        {
+            if (!IsConfiguredBuiltInParameter(parameter.Key))
+                AppendParameter(parts, Encode(parameter.Key), parameter.Value);
+        }
+
         for (var i = 0; i < _fields.Count; i++)
             parts.Add($"fields[{i}]={Encode(_fields[i])}");
 
@@ -178,9 +184,6 @@ public class QueryBuilder
             parts.Add($"take={_take.Value.ToString(CultureInfo.InvariantCulture)}");
         if (_skip.HasValue)
             parts.Add($"skip={_skip.Value.ToString(CultureInfo.InvariantCulture)}");
-
-        foreach (var parameter in _parameters)
-            AppendParameter(parts, Encode(parameter.Key), parameter.Value);
 
         return string.Join("&", parts);
     }
@@ -239,13 +242,6 @@ public class QueryBuilder
         if (_filters.Count == 0)
             return;
 
-        if (_filters.All(filter => !filter.IsGroup))
-        {
-            for (var i = 0; i < _filters.Count; i++)
-                AppendFilterNode(parts, $"filter[{i}]", _filters[i]);
-            return;
-        }
-
         if (_filters.Count == 1 && _filters[0].IsGroup)
         {
             AppendFilterGroup(parts, "filter", _filters[0]);
@@ -256,6 +252,16 @@ public class QueryBuilder
         for (var i = 0; i < _filters.Count; i++)
             AppendFilterNode(parts, $"filter[filters][{i}]", _filters[i]);
     }
+
+    private bool IsConfiguredBuiltInParameter(string name) => name switch
+    {
+        "fields" => _fields.Count > 0,
+        "filter" => _filters.Count > 0,
+        "sort" => _sorts.Count > 0,
+        "take" => _take.HasValue,
+        "skip" => _skip.HasValue,
+        _ => false
+    };
 
     private static void AppendFilterNode(List<string> parts, string prefix, FilterNode node)
     {

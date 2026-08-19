@@ -15,6 +15,7 @@ internal sealed class HttpCommunicator : IDisposable
     private readonly bool _ownsHttpClient;
     private readonly DaktelaConfig _config;
     private readonly RetryPolicy? _retryPolicy;
+    private readonly RateLimitPolicy? _rateLimitPolicy;
     private readonly Uri _baseUri;
     private readonly JsonSerializerOptions _jsonOptions;
     private readonly TimeSpan _timeout;
@@ -28,6 +29,8 @@ internal sealed class HttpCommunicator : IDisposable
         _config = config;
         _retryPolicy = config.RetryPolicy;
         _retryPolicy?.Validate();
+        _rateLimitPolicy = config.RateLimitPolicy;
+        _rateLimitPolicy?.Validate();
         _baseUri = new Uri(config.GetBaseUrl(), UriKind.Absolute);
         _jsonOptions = jsonOptions;
         _timeout = config.Timeout;
@@ -73,7 +76,7 @@ internal sealed class HttpCommunicator : IDisposable
                     HttpCompletionOption.ResponseHeadersRead,
                     timeoutSource?.Token ?? cancellationToken).ConfigureAwait(false);
 
-                if (ShouldRetry(response.StatusCode, attempt, canRetryMethod))
+                if (ShouldRetry(response, attempt, canRetryMethod))
                 {
                     var delay = GetRetryDelay(response, attempt);
                     response.Dispose();
@@ -99,7 +102,9 @@ internal sealed class HttpCommunicator : IDisposable
             }
             catch (HttpRequestException ex)
             {
-                if (canRetryMethod && _retryPolicy != null && attempt < _retryPolicy.MaxRetries)
+                if (canRetryMethod &&
+                    _retryPolicy?.RetryOnConnectionError == true &&
+                    attempt < _retryPolicy.MaxRetries)
                 {
                     await Task.Delay(_retryPolicy.GetDelay(attempt), cancellationToken).ConfigureAwait(false);
                     attempt++;
@@ -115,7 +120,7 @@ internal sealed class HttpCommunicator : IDisposable
     {
         var request = new HttpRequestMessage(method, BuildUrl(endpoint));
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-        request.Headers.UserAgent.ParseAdd("Daktela.Connector/1.0");
+        request.Headers.UserAgent.ParseAdd(BuildUserAgent());
         ApplyAuthentication(request);
 
         if (body != null)
@@ -173,25 +178,40 @@ internal sealed class HttpCommunicator : IDisposable
         }
     }
 
-    private bool ShouldRetry(HttpStatusCode statusCode, int attempt, bool canRetryMethod)
-        => canRetryMethod &&
-           _retryPolicy != null &&
-           attempt < _retryPolicy.MaxRetries &&
-           _retryPolicy.RetryableStatusCodes.Contains((int)statusCode);
+    private bool ShouldRetry(HttpResponseMessage response, int attempt, bool canRetryMethod)
+    {
+        if (response.StatusCode == HttpStatusCode.TooManyRequests && _rateLimitPolicy != null)
+        {
+            if (!_rateLimitPolicy.AutoRetry || attempt >= _rateLimitPolicy.MaxRetries)
+                return false;
+
+            var delay = ReadRateLimitDelay(response) ?? _rateLimitPolicy.DefaultWait;
+            return delay <= _rateLimitPolicy.MaxWait;
+        }
+
+        return canRetryMethod &&
+               _retryPolicy != null &&
+               attempt < _retryPolicy.MaxRetries &&
+               _retryPolicy.RetryableStatusCodes.Contains((int)response.StatusCode);
+    }
 
     private TimeSpan GetRetryDelay(HttpResponseMessage response, int attempt)
     {
-        if (response.StatusCode == HttpStatusCode.TooManyRequests &&
-            response.Headers.TryGetValues("Retry-After", out var values))
+        if (response.StatusCode == HttpStatusCode.TooManyRequests)
         {
-            var retryAfter = RateLimitHandler.ParseRetryAfter(values.FirstOrDefault());
+            var retryAfter = ReadRateLimitDelay(response);
             if (retryAfter.HasValue)
             {
                 var nonNegativeDelay = retryAfter.Value < TimeSpan.Zero ? TimeSpan.Zero : retryAfter.Value;
+                if (_rateLimitPolicy != null)
+                    return nonNegativeDelay;
                 return _retryPolicy != null && nonNegativeDelay > _retryPolicy.MaxDelay
                     ? _retryPolicy.MaxDelay
                     : nonNegativeDelay;
             }
+
+            if (_rateLimitPolicy != null)
+                return _rateLimitPolicy.DefaultWait;
         }
 
         return _retryPolicy?.GetDelay(attempt) ?? TimeSpan.Zero;
@@ -199,6 +219,25 @@ internal sealed class HttpCommunicator : IDisposable
 
     private static bool IsSafeToRetry(HttpMethod method)
         => method == HttpMethod.Get || method == HttpMethod.Head || method == HttpMethod.Options;
+
+    private static TimeSpan? ReadRateLimitDelay(HttpResponseMessage response)
+    {
+        if (!response.Headers.TryGetValues("Retry-After", out var values))
+            return null;
+        return RateLimitHandler.ParseRetryAfter(values.FirstOrDefault());
+    }
+
+    private string BuildUserAgent()
+    {
+        var assemblyVersion = typeof(HttpCommunicator).Assembly.GetName().Version;
+        var version = assemblyVersion == null || assemblyVersion.Build < 0
+            ? "unknown"
+            : $"{assemblyVersion.Major}.{assemblyVersion.Minor}.{assemblyVersion.Build}";
+        var userAgent = $"Daktela.Connector/{version}";
+        return string.IsNullOrWhiteSpace(_config.UserAgentSuffix)
+            ? userAgent
+            : $"{userAgent} {_config.UserAgentSuffix.Trim()}";
+    }
 
     private CancellationTokenSource? CreateTimeoutSource(CancellationToken cancellationToken)
     {

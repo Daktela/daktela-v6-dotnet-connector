@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace Daktela.Connector;
 
 /// <summary>
@@ -19,6 +21,16 @@ public class DaktelaResponse
     /// Indicates whether the request was successful (2xx status code).
     /// </summary>
     public bool IsSuccess => StatusCode >= 200 && StatusCode < 300;
+
+    /// <summary>
+    /// Indicates whether the API returned one or more structured errors.
+    /// </summary>
+    public bool HasErrors => Errors is { Count: > 0 };
+
+    /// <summary>
+    /// The first structured API error, or null when none were returned.
+    /// </summary>
+    public DaktelaError? FirstError => Errors?.FirstOrDefault();
 
     /// <summary>
     /// The raw JSON response body.
@@ -48,6 +60,25 @@ public class DaktelaResponse<T> : DaktelaResponse
     /// The total number of records available (for paginated responses).
     /// </summary>
     public int? Total { get; }
+
+    /// <summary>
+    /// Indicates whether response data is null, undefined, or an empty collection/object.
+    /// </summary>
+    public bool IsEmpty => Data switch
+    {
+        null => true,
+        JsonElement element => element.ValueKind switch
+        {
+            JsonValueKind.Null or JsonValueKind.Undefined => true,
+            JsonValueKind.Array => element.GetArrayLength() == 0,
+            JsonValueKind.Object => !element.EnumerateObject().Any(),
+            _ => false
+        },
+        System.Collections.ICollection collection => collection.Count == 0,
+        System.Collections.IEnumerable enumerable and not string =>
+            !enumerable.Cast<object?>().Any(),
+        _ => false
+    };
 
     public DaktelaResponse(int statusCode, T? data = default, int? total = null, List<DaktelaError>? errors = null, string? rawResponse = null)
         : base(statusCode, errors, rawResponse)

@@ -48,6 +48,20 @@ public class ProtocolTests
     }
 
     [Fact]
+    public async Task Endpoint_FirstCharacterIsLowercased()
+    {
+        using var handler = RecordingHandler.ReturnJson("""{"result":{"data":[]}}""");
+        using var httpClient = new HttpClient(handler);
+        using var client = CreateClient(httpClient);
+
+        await client.GetAsync<UserDto>("CampaignsRecords");
+
+        Assert.EndsWith(
+            "/api/v6/campaignsRecords.json",
+            Assert.Single(handler.Requests).Uri.AbsoluteUri);
+    }
+
+    [Fact]
     public async Task GetSingle_ReadsNestedDataAndEscapesRecordId()
     {
         using var handler = RecordingHandler.ReturnJson(
@@ -116,6 +130,21 @@ public class ProtocolTests
     }
 
     [Fact]
+    public async Task RawPost_ReturnsDetachedJsonWithoutResponseDto()
+    {
+        using var handler = RecordingHandler.ReturnJson(
+            """{"result":{"data":{"id":"created"}}}""");
+        using var httpClient = new HttpClient(handler);
+        using var client = CreateClient(httpClient);
+
+        var response = await client.PostAsync("Contacts", new { Name = "Alice" });
+
+        Assert.Equal("created", response.Data.GetProperty("id").GetString());
+        Assert.Equal(HttpMethod.Post, Assert.Single(handler.Requests).Method);
+        Assert.EndsWith("/api/v6/contacts.json", handler.Requests[0].Uri.AbsoluteUri);
+    }
+
+    [Fact]
     public async Task Put_UsesRecordPathAndReturnsNestedData()
     {
         using var handler = RecordingHandler.ReturnJson(
@@ -137,6 +166,24 @@ public class ProtocolTests
     }
 
     [Fact]
+    public async Task RawPut_SupportsCombinedAndSplitRecordPaths()
+    {
+        using var handler = RecordingHandler.ReturnJson(
+            """{"result":{"data":{"name":"updated"}}}""");
+        using var httpClient = new HttpClient(handler);
+        using var client = CreateClient(httpClient);
+
+        var combined = await client.PutAsync("Contacts/record-1", new { Name = "updated" });
+        var split = await client.PutAsync("Contacts", "record-2", new { Name = "updated" });
+
+        Assert.Equal("updated", combined.Data.GetProperty("name").GetString());
+        Assert.Equal("updated", split.Data.GetProperty("name").GetString());
+        Assert.EndsWith("/api/v6/contacts/record-1.json", handler.Requests[0].Uri.AbsoluteUri);
+        Assert.EndsWith("/api/v6/contacts/record-2.json", handler.Requests[1].Uri.AbsoluteUri);
+        Assert.All(handler.Requests, request => Assert.Equal(HttpMethod.Put, request.Method));
+    }
+
+    [Fact]
     public async Task Delete_HandlesEmptySuccessBodyAndDisposesResponse()
     {
         var content = new TrackingContent(string.Empty);
@@ -154,6 +201,21 @@ public class ProtocolTests
     }
 
     [Fact]
+    public async Task Delete_SupportsCombinedRecordPath()
+    {
+        using var handler = new RecordingHandler((_, _, _) => Task.FromResult(
+            new HttpResponseMessage(HttpStatusCode.NoContent)));
+        using var httpClient = new HttpClient(handler);
+        using var client = CreateClient(httpClient);
+
+        var response = await client.DeleteAsync("Contacts/record-1");
+
+        Assert.True(response.IsSuccess);
+        Assert.Equal(HttpMethod.Delete, Assert.Single(handler.Requests).Method);
+        Assert.EndsWith("/api/v6/contacts/record-1.json", handler.Requests[0].Uri.AbsoluteUri);
+    }
+
+    [Fact]
     public async Task QueryBuilder_IsSentUsingDocumentedWireNames()
     {
         using var handler = RecordingHandler.ReturnJson("""{"result":{"data":[]}}""");
@@ -167,8 +229,9 @@ public class ProtocolTests
         await client.GetAsync<UserDto>("users", query);
 
         var queryString = Uri.UnescapeDataString(Assert.Single(handler.Requests).Uri.Query);
-        Assert.Contains("filter[0][operator]=notin", queryString);
-        Assert.Contains("filter[0][value][0]=deleted", queryString);
+        Assert.Contains("filter[logic]=and", queryString);
+        Assert.Contains("filter[filters][0][operator]=notin", queryString);
+        Assert.Contains("filter[filters][0][value][0]=deleted", queryString);
         Assert.Contains("sort[0][dir]=desc", queryString);
         Assert.Contains("take=10", queryString);
     }
@@ -225,6 +288,21 @@ public class ProtocolTests
     }
 
     [Fact]
+    public async Task UserAgent_UsesAssemblyVersionAndConfiguredSuffix()
+    {
+        using var handler = RecordingHandler.ReturnJson("""{"result":{"data":[]}}""");
+        using var httpClient = new HttpClient(handler);
+        using var client = CreateClient(httpClient, userAgentSuffix: "MyApp/2.0");
+
+        await client.GetAsync<UserDto>("users");
+
+        var version = typeof(DaktelaClient).Assembly.GetName().Version!;
+        Assert.Equal(
+            $"Daktela.Connector/{version.Major}.{version.Minor}.{version.Build} MyApp/2.0",
+            string.Join(' ', handler.Requests[0].Headers["User-Agent"]));
+    }
+
+    [Fact]
     public async Task Ping_UsesAuthenticatedWhoimEndpoint()
     {
         using var handler = RecordingHandler.ReturnJson("""{"result":{"data":{"name":"agent"}}}""");
@@ -235,6 +313,39 @@ public class ProtocolTests
 
         Assert.True(healthy);
         Assert.EndsWith("/api/v6/whoim.json", Assert.Single(handler.Requests).Uri.AbsoluteUri);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.OK, true)]
+    [InlineData(HttpStatusCode.ServiceUnavailable, false)]
+    public async Task HealthCheck_ReturnsStatusAndLatency(HttpStatusCode statusCode, bool healthy)
+    {
+        using var handler = RecordingHandler.ReturnJson("{}", statusCode);
+        using var httpClient = new HttpClient(handler);
+        using var client = CreateClient(httpClient);
+
+        var result = await client.HealthCheckAsync();
+
+        Assert.Equal(healthy, result.Healthy);
+        Assert.Equal((int)statusCode, result.StatusCode);
+        Assert.True(result.Latency >= TimeSpan.Zero);
+        Assert.Equal(healthy, result.Error is null);
+        Assert.EndsWith("/api/v6/whoim.json", Assert.Single(handler.Requests).Uri.AbsoluteUri);
+    }
+
+    [Fact]
+    public async Task HealthCheck_ReportsConnectionFailureWithoutThrowing()
+    {
+        using var handler = new RecordingHandler((_, _, _) =>
+            Task.FromException<HttpResponseMessage>(new HttpRequestException("offline")));
+        using var httpClient = new HttpClient(handler);
+        using var client = CreateClient(httpClient);
+
+        var result = await client.HealthCheckAsync();
+
+        Assert.False(result.Healthy);
+        Assert.Null(result.StatusCode);
+        Assert.Contains("offline", result.Error);
     }
 
     [Fact]
@@ -292,6 +403,46 @@ public class ProtocolTests
         Assert.Equal(TimeSpan.FromSeconds(15), exception.RetryAfter);
         Assert.Equal("RATE_LIMIT", Assert.Single(exception.Errors).Code);
         Assert.Equal("Slow down", Assert.Single(exception.Errors).Message);
+    }
+
+    [Fact]
+    public async Task RateLimitPolicy_RetriesExplicitlyConfiguredPost()
+    {
+        using var handler = new RecordingHandler((attempt, _, _) =>
+        {
+            if (attempt > 1)
+                return Task.FromResult(JsonResponse("""{"result":{"data":{"name":"created"}}}"""));
+
+            var response = JsonResponse("{}", HttpStatusCode.TooManyRequests);
+            response.Headers.TryAddWithoutValidation("Retry-After", "0");
+            return Task.FromResult(response);
+        });
+        using var httpClient = new HttpClient(handler);
+        using var client = CreateClient(httpClient, rateLimitPolicy: ImmediateRateLimitPolicy());
+
+        var response = await client.PostAsync<UserDto>("contacts", new { Name = "created" });
+
+        Assert.Equal("created", response.Data?.Name);
+        Assert.Equal(2, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task RateLimitPolicy_DoesNotWaitPastConfiguredMaximum()
+    {
+        using var handler = new RecordingHandler((_, _, _) =>
+        {
+            var response = JsonResponse("{}", HttpStatusCode.TooManyRequests);
+            response.Headers.TryAddWithoutValidation("Retry-After", "10");
+            return Task.FromResult(response);
+        });
+        using var httpClient = new HttpClient(handler);
+        using var client = CreateClient(httpClient, rateLimitPolicy: ImmediateRateLimitPolicy());
+
+        var exception = await Assert.ThrowsAsync<DaktelaRateLimitException>(
+            () => client.GetAsync<UserDto>("users"));
+
+        Assert.Equal(TimeSpan.FromSeconds(10), exception.RetryAfter);
+        Assert.Single(handler.Requests);
     }
 
     [Theory]
@@ -395,6 +546,22 @@ public class ProtocolTests
     }
 
     [Fact]
+    public async Task NetworkFailure_IsNotRetriedWhenDisabled()
+    {
+        using var handler = new RecordingHandler((_, _, _) =>
+            Task.FromException<HttpResponseMessage>(new HttpRequestException("offline")));
+        using var httpClient = new HttpClient(handler);
+        var policy = ImmediateRetryPolicy();
+        policy.RetryOnConnectionError = false;
+        using var client = CreateClient(httpClient, retryPolicy: policy);
+
+        await Assert.ThrowsAsync<DaktelaConnectionException>(
+            () => client.GetAsync<UserDto>("users"));
+
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
     public async Task Timeout_IsRetriedForGetWhenEnabled()
     {
         using var handler = new RecordingHandler(async (attempt, _, cancellationToken) =>
@@ -483,6 +650,105 @@ public class ProtocolTests
         Assert.Contains("skip=2", handler.Requests[1].Uri.Query);
     }
 
+    [Fact]
+    public async Task Iterator_ContinuesWhenServerCapsPageBelowRequestedTake()
+    {
+        using var handler = new RecordingHandler((attempt, _, _) => Task.FromResult(
+            attempt == 1
+                ? JsonResponse("""{"result":{"data":[{"name":"one"}],"total":3}}""")
+                : JsonResponse("""{"result":{"data":[{"name":"two"},{"name":"three"}],"total":3}}""")));
+        using var httpClient = new HttpClient(handler);
+        using var client = CreateClient(httpClient);
+        var names = new List<string?>();
+
+        await foreach (var item in client.IterateAsync<UserDto>("users", pageSize: 2))
+            names.Add(item.Name);
+
+        Assert.Equal(new[] { "one", "two", "three" }, names);
+        Assert.Equal(2, handler.Requests.Count);
+        Assert.Contains("skip=1", handler.Requests[1].Uri.Query);
+    }
+
+    [Fact]
+    public async Task Iterator_DoesNotTreatDefaultTotalAsPaginationBoundary()
+    {
+        using var handler = new RecordingHandler((attempt, _, _) => Task.FromResult(
+            attempt == 1
+                ? JsonResponse("""{"result":{"data":[{"name":"one"},{"name":"two"}]}}""")
+                : JsonResponse("""{"result":{"data":[]}}""")));
+        using var httpClient = new HttpClient(handler);
+        using var client = CreateClient(httpClient);
+        var names = new List<string?>();
+
+        await foreach (var item in client.IterateAsync<UserDto>("users", pageSize: 2))
+            names.Add(item.Name);
+
+        Assert.Equal(new[] { "one", "two" }, names);
+        Assert.Equal(2, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task Paginator_ProvidesCollectionHelpers()
+    {
+        using var handler = RecordingHandler.ReturnJson(
+            """{"result":{"data":[{"name":"one"},{"name":"two"}],"total":2}}""");
+        using var httpClient = new HttpClient(handler);
+        using var client = CreateClient(httpClient);
+        var paginator = client.Paginate<UserDto>("Users", pageSize: 2);
+
+        Assert.Equal(2, (await paginator.ToListAsync()).Count);
+        Assert.Equal(2, await paginator.CountAsync());
+        Assert.Equal("one", (await paginator.FirstOrDefaultAsync())?.Name);
+        Assert.False(await paginator.IsEmptyAsync());
+
+        var visited = new List<string?>();
+        await paginator.ForEachAsync((item, index) => visited.Add($"{index}:{item.Name}"));
+        Assert.Equal(new[] { "0:one", "1:two" }, visited);
+
+        var filtered = new List<string?>();
+        await foreach (var item in paginator.Filter(item => item.Name == "two"))
+            filtered.Add(item.Name);
+        Assert.Equal(new[] { "two" }, filtered);
+
+        var mapped = new List<string?>();
+        await foreach (var name in paginator.Map(item => item.Name))
+            mapped.Add(name);
+        Assert.Equal(new[] { "one", "two" }, mapped);
+    }
+
+    [Fact]
+    public async Task Paginator_CanSkipFailedPageWhenConfigured()
+    {
+        using var handler = new RecordingHandler((attempt, _, _) => Task.FromResult(
+            attempt == 1
+                ? JsonResponse("{}", HttpStatusCode.InternalServerError)
+                : JsonResponse("""{"result":{"data":[{"name":"recovered"}],"total":3}}""")));
+        using var httpClient = new HttpClient(handler);
+        using var client = CreateClient(httpClient);
+
+        var result = await client.Paginate<UserDto>(
+            "users",
+            pageSize: 2,
+            stopOnError: false).ToListAsync();
+
+        Assert.Equal("recovered", Assert.Single(result).Name);
+        Assert.Equal(2, handler.Requests.Count);
+        Assert.Contains("skip=2", handler.Requests[1].Uri.Query);
+    }
+
+    [Fact]
+    public async Task Paginator_StopsOnFailedPageByDefault()
+    {
+        using var handler = RecordingHandler.ReturnJson("{}", HttpStatusCode.InternalServerError);
+        using var httpClient = new HttpClient(handler);
+        using var client = CreateClient(httpClient);
+
+        var result = await client.Paginate<UserDto>("users").ToListAsync();
+
+        Assert.Empty(result);
+        Assert.Single(handler.Requests);
+    }
+
     [Theory]
     [InlineData("https://evil.example/users")]
     [InlineData("../users")]
@@ -504,13 +770,17 @@ public class ProtocolTests
         string instanceUrl = "https://tenant.daktela.test",
         AuthMethod authMethod = AuthMethod.Header,
         RetryPolicy? retryPolicy = null,
-        TimeSpan? timeout = null)
+        TimeSpan? timeout = null,
+        RateLimitPolicy? rateLimitPolicy = null,
+        string? userAgentSuffix = null)
         => new(new DaktelaConfig
         {
             InstanceUrl = instanceUrl,
             AccessToken = "secret-token",
             AuthMethod = authMethod,
             RetryPolicy = retryPolicy,
+            RateLimitPolicy = rateLimitPolicy,
+            UserAgentSuffix = userAgentSuffix,
             Timeout = timeout ?? TimeSpan.FromSeconds(2)
         }, httpClient);
 
@@ -519,6 +789,13 @@ public class ProtocolTests
         MaxRetries = 1,
         InitialDelay = TimeSpan.Zero,
         MaxDelay = TimeSpan.Zero
+    };
+
+    private static RateLimitPolicy ImmediateRateLimitPolicy() => new()
+    {
+        MaxRetries = 1,
+        MaxWait = TimeSpan.Zero,
+        DefaultWait = TimeSpan.Zero
     };
 
     private static HttpResponseMessage JsonResponse(

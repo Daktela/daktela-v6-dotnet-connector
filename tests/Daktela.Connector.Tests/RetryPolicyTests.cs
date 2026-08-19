@@ -16,6 +16,7 @@ public class RetryPolicyTests
         Assert.Equal(2.0, policy.BackoffMultiplier);
         Assert.False(policy.RetryUnsafeHttpMethods);
         Assert.True(policy.RetryOnTimeout);
+        Assert.True(policy.RetryOnConnectionError);
     }
 
     [Fact]
@@ -24,6 +25,36 @@ public class RetryPolicyTests
         var policy = RetryPolicy.NoRetry;
 
         Assert.Equal(0, policy.MaxRetries);
+    }
+
+    [Fact]
+    public void Aggressive_HasExpectedValues()
+    {
+        var policy = RetryPolicy.Aggressive;
+
+        Assert.Equal(5, policy.MaxRetries);
+        Assert.Equal(TimeSpan.FromMilliseconds(50), policy.InitialDelay);
+        Assert.Equal(TimeSpan.FromSeconds(30), policy.MaxDelay);
+        Assert.Equal(2.5, policy.BackoffMultiplier);
+    }
+
+    [Fact]
+    public void RateLimitPolicy_HasExpectedDefaults()
+    {
+        var policy = new RateLimitPolicy();
+
+        Assert.True(policy.AutoRetry);
+        Assert.Equal(3, policy.MaxRetries);
+        Assert.Equal(TimeSpan.FromSeconds(60), policy.MaxWait);
+        Assert.Equal(TimeSpan.FromSeconds(5), policy.DefaultWait);
+    }
+
+    [Fact]
+    public void RateLimitPolicy_InvalidSettingsThrow()
+    {
+        var policy = new RateLimitPolicy { MaxRetries = -1 };
+
+        Assert.Throws<ArgumentOutOfRangeException>(policy.Validate);
     }
 
     [Fact]

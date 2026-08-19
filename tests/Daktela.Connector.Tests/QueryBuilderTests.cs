@@ -27,9 +27,10 @@ public class QueryBuilderTests
 
         var result = query.Build();
 
-        Assert.Contains("filter[0][field]=status", result);
-        Assert.Contains("filter[0][operator]=eq", result);
-        Assert.Contains("filter[0][value]=active", result);
+        Assert.Contains("filter[logic]=and", result);
+        Assert.Contains("filter[filters][0][field]=status", result);
+        Assert.Contains("filter[filters][0][operator]=eq", result);
+        Assert.Contains("filter[filters][0][value]=active", result);
     }
 
     [Fact]
@@ -41,12 +42,13 @@ public class QueryBuilderTests
 
         var result = query.Build();
 
-        Assert.Contains("filter[0][field]=status", result);
-        Assert.Contains("filter[0][operator]=eq", result);
-        Assert.Contains("filter[0][value]=active", result);
-        Assert.Contains("filter[1][field]=age", result);
-        Assert.Contains("filter[1][operator]=gte", result);
-        Assert.Contains("filter[1][value]=18", result);
+        Assert.Contains("filter[logic]=and", result);
+        Assert.Contains("filter[filters][0][field]=status", result);
+        Assert.Contains("filter[filters][0][operator]=eq", result);
+        Assert.Contains("filter[filters][0][value]=active", result);
+        Assert.Contains("filter[filters][1][field]=age", result);
+        Assert.Contains("filter[filters][1][operator]=gte", result);
+        Assert.Contains("filter[filters][1][value]=18", result);
     }
 
     [Fact]
@@ -103,7 +105,7 @@ public class QueryBuilderTests
 
         Assert.Contains("fields[0]=name", result);
         Assert.Contains("fields[1]=email", result);
-        Assert.Contains("filter[0][field]=status", result);
+        Assert.Contains("filter[filters][0][field]=status", result);
         Assert.Contains("sort[0][field]=created", result);
         Assert.Contains("take=50", result);
         Assert.Contains("skip=0", result);
@@ -126,7 +128,7 @@ public class QueryBuilderTests
 
         var result = query.Build();
 
-        Assert.Contains("filter[0][value]=2024-01-15+10%3a30%3a00", result);
+        Assert.Contains("filter[filters][0][value]=2024-01-15+10%3a30%3a00", result);
     }
 
     [Fact]
@@ -138,8 +140,8 @@ public class QueryBuilderTests
 
         var result = query.Build();
 
-        Assert.Contains("filter[0][value]=1", result);
-        Assert.Contains("filter[1][value]=0", result);
+        Assert.Contains("filter[filters][0][value]=1", result);
+        Assert.Contains("filter[filters][1][value]=0", result);
     }
 
     [Theory]
@@ -166,7 +168,7 @@ public class QueryBuilderTests
 
         var result = query.Build();
 
-        Assert.Contains($"filter[0][operator]={expected}", result);
+        Assert.Contains($"filter[filters][0][operator]={expected}", result);
     }
 
     [Fact]
@@ -230,7 +232,7 @@ public class QueryBuilderTests
             .Filter("custom", "future_operator", "value")
             .Build();
 
-        Assert.Contains("filter[0][operator]=future_operator", result);
+        Assert.Contains("filter[filters][0][operator]=future_operator", result);
     }
 
     [Fact]
@@ -261,7 +263,7 @@ public class QueryBuilderTests
                 .Filter("price", FilterOperator.Gte, 12.5m)
                 .Build();
 
-            Assert.Contains("filter[0][value]=12.5", result);
+            Assert.Contains("filter[filters][0][value]=12.5", result);
         }
         finally
         {
@@ -282,10 +284,28 @@ public class QueryBuilderTests
         filterValues[0] = "changed";
         parameterValues[0] = 99;
 
-        Assert.Contains("filter[0][value][0]=new", clone.Build());
+        Assert.Contains("filter[filters][0][value][0]=new", clone.Build());
         Assert.Contains("ids[0]=1", clone.Build());
-        Assert.Contains("filter[0][value][0]=changed", original.Build());
+        Assert.Contains("filter[filters][0][value][0]=changed", original.Build());
         Assert.Contains("ids[0]=99", original.Build());
+    }
+
+    [Fact]
+    public void StructuredSettings_OverrideAdditionalParametersWithSameNames()
+    {
+        var result = new QueryBuilder()
+            .Parameter("take", 999)
+            .Parameter("filter", "legacy")
+            .Parameter("custom", "kept")
+            .Take(25)
+            .Filter("active", FilterOperator.Eq, true)
+            .Build();
+
+        Assert.Contains("take=25", result);
+        Assert.DoesNotContain("take=999", result);
+        Assert.DoesNotContain("filter=legacy", result);
+        Assert.Contains("filter[filters][0][field]=active", result);
+        Assert.Contains("custom=kept", result);
     }
 
     [Fact]

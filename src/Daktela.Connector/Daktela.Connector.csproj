@@ -8,17 +8,17 @@
 
     <!-- NuGet Package Metadata -->
     <PackageId>Daktela.Connector</PackageId>
-    <Version>1.1.0</Version>
+    <Version>1.2.0</Version>
     <Authors>Daktela</Authors>
     <Company>Daktela</Company>
-    <Description>Typed .NET client for the Daktela V6 API with filtering, pagination, retries, and structured errors.</Description>
+    <Description>Typed .NET client for the Daktela V6 API with filtering, pagination, retries, rate limits, health checks, and structured errors.</Description>
     <PackageTags>daktela;api;connector;callcenter;contact-center</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/Daktela/daktela-v6-dotnet-connector</PackageProjectUrl>
     <RepositoryUrl>https://github.com/Daktela/daktela-v6-dotnet-connector</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageReadmeFile>README.md</PackageReadmeFile>
-    <PackageReleaseNotes>Corrects Daktela V6 response parsing, query encoding, date/time handling, endpoint validation, and retry safety. See the README upgrade notes for behavior changes from 1.0.1.</PackageReleaseNotes>
+    <PackageReleaseNotes>Adds raw CRUD paths, paginator helpers, health checks, rate-limit policy, retry configuration, response helpers, phone formatting, User-Agent customization, and canonical filter encoding. See the README upgrade notes.</PackageReleaseNotes>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
 
     <!-- Enable XML documentation -->

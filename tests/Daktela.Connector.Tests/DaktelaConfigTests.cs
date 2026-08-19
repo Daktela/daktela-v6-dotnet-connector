@@ -53,5 +53,7 @@ public class DaktelaConfigTests
         Assert.Equal(TimeSpan.FromSeconds(30), config.Timeout);
         Assert.True(config.VerifySsl);
         Assert.Null(config.RetryPolicy);
+        Assert.Null(config.RateLimitPolicy);
+        Assert.Null(config.UserAgentSuffix);
     }
 }

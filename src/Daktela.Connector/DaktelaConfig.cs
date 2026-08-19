@@ -39,6 +39,17 @@ public class DaktelaConfig
     public RetryPolicy? RetryPolicy { get; set; }
 
     /// <summary>
+    /// Optional policy dedicated to HTTP 429 responses. When omitted, 429 responses use
+    /// <see cref="RetryPolicy"/> like any other configured retryable status code.
+    /// </summary>
+    public RateLimitPolicy? RateLimitPolicy { get; set; }
+
+    /// <summary>
+    /// Optional suffix appended to the connector User-Agent, for example <c>MyApp/2.0</c>.
+    /// </summary>
+    public string? UserAgentSuffix { get; set; }
+
+    /// <summary>
     /// Optional JSON serializer settings. The connector copies these settings and adds
     /// converters for Daktela date/time values.
     /// </summary>
