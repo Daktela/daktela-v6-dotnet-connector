@@ -1,6 +1,7 @@
 using System.Collections;
 using System.Globalization;
 using System.Web;
+using Daktela.Connector.Serialization;
 
 namespace Daktela.Connector.Query;
 
@@ -159,20 +160,26 @@ public class QueryBuilder
     /// <summary>
     /// Builds the encoded query string without a leading question mark.
     /// </summary>
-    public string Build()
+    public string Build() => Build(null);
+
+    /// <summary>
+    /// Builds the query string, converting date/time values that carry a zone or offset
+    /// into the Daktela server's wall-clock time when a server time zone is known.
+    /// </summary>
+    internal string Build(TimeZoneInfo? serverTimeZone)
     {
         var parts = new List<string>();
 
         foreach (var parameter in _parameters)
         {
             if (!IsConfiguredBuiltInParameter(parameter.Key))
-                AppendParameter(parts, Encode(parameter.Key), parameter.Value);
+                AppendParameter(parts, Encode(parameter.Key), parameter.Value, serverTimeZone);
         }
 
         for (var i = 0; i < _fields.Count; i++)
             parts.Add($"fields[{i}]={Encode(_fields[i])}");
 
-        AppendFilters(parts);
+        AppendFilters(parts, serverTimeZone);
 
         for (var i = 0; i < _sorts.Count; i++)
         {
@@ -237,20 +244,20 @@ public class QueryBuilder
         return this;
     }
 
-    private void AppendFilters(List<string> parts)
+    private void AppendFilters(List<string> parts, TimeZoneInfo? serverTimeZone)
     {
         if (_filters.Count == 0)
             return;
 
         if (_filters.Count == 1 && _filters[0].IsGroup)
         {
-            AppendFilterGroup(parts, "filter", _filters[0]);
+            AppendFilterGroup(parts, "filter", _filters[0], serverTimeZone);
             return;
         }
 
         parts.Add("filter[logic]=and");
         for (var i = 0; i < _filters.Count; i++)
-            AppendFilterNode(parts, $"filter[filters][{i}]", _filters[i]);
+            AppendFilterNode(parts, $"filter[filters][{i}]", _filters[i], serverTimeZone);
     }
 
     private bool IsConfiguredBuiltInParameter(string name) => name switch
@@ -263,27 +270,39 @@ public class QueryBuilder
         _ => false
     };
 
-    private static void AppendFilterNode(List<string> parts, string prefix, FilterNode node)
+    private static void AppendFilterNode(
+        List<string> parts,
+        string prefix,
+        FilterNode node,
+        TimeZoneInfo? serverTimeZone)
     {
         if (node.IsGroup)
         {
-            AppendFilterGroup(parts, prefix, node);
+            AppendFilterGroup(parts, prefix, node, serverTimeZone);
             return;
         }
 
         parts.Add($"{prefix}[field]={Encode(node.Field!)}");
         parts.Add($"{prefix}[operator]={Encode(node.Operator!)}");
-        AppendParameter(parts, $"{prefix}[value]", node.Value);
+        AppendParameter(parts, $"{prefix}[value]", node.Value, serverTimeZone);
     }
 
-    private static void AppendFilterGroup(List<string> parts, string prefix, FilterNode group)
+    private static void AppendFilterGroup(
+        List<string> parts,
+        string prefix,
+        FilterNode group,
+        TimeZoneInfo? serverTimeZone)
     {
         parts.Add($"{prefix}[logic]={group.Logic}");
         for (var i = 0; i < group.Children.Count; i++)
-            AppendFilterNode(parts, $"{prefix}[filters][{i}]", group.Children[i]);
+            AppendFilterNode(parts, $"{prefix}[filters][{i}]", group.Children[i], serverTimeZone);
     }
 
-    private static void AppendParameter(List<string> parts, string key, object? value)
+    private static void AppendParameter(
+        List<string> parts,
+        string key,
+        object? value,
+        TimeZoneInfo? serverTimeZone)
     {
         if (value is null)
         {
@@ -294,7 +313,7 @@ public class QueryBuilder
         if (value is IDictionary dictionary)
         {
             foreach (DictionaryEntry item in dictionary)
-                AppendParameter(parts, $"{key}[{Encode(Convert.ToString(item.Key, CultureInfo.InvariantCulture) ?? string.Empty)}]", item.Value);
+                AppendParameter(parts, $"{key}[{Encode(Convert.ToString(item.Key, CultureInfo.InvariantCulture) ?? string.Empty)}]", item.Value, serverTimeZone);
             return;
         }
 
@@ -303,19 +322,19 @@ public class QueryBuilder
             var index = 0;
             foreach (var item in enumerable)
             {
-                AppendParameter(parts, $"{key}[{index}]", item);
+                AppendParameter(parts, $"{key}[{index}]", item, serverTimeZone);
                 index++;
             }
             return;
         }
 
-        parts.Add($"{key}={FormatValue(value)}");
+        parts.Add($"{key}={FormatValue(value, serverTimeZone)}");
     }
 
-    private static string FormatValue(object value) => value switch
+    private static string FormatValue(object value, TimeZoneInfo? serverTimeZone) => value switch
     {
-        DateTime date => Encode(date.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)),
-        DateTimeOffset date => Encode(date.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)),
+        DateTime date => Encode(DaktelaDateTime.ToWire(date, serverTimeZone)),
+        DateTimeOffset date => Encode(DaktelaDateTime.ToWire(date, serverTimeZone)),
         bool boolean => boolean ? "1" : "0",
         IFormattable formattable => Encode(formattable.ToString(null, CultureInfo.InvariantCulture) ?? string.Empty),
         _ => Encode(value.ToString() ?? string.Empty)

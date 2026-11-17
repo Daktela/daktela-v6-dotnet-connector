@@ -9,34 +9,47 @@ namespace Daktela.Connector;
 /// </summary>
 public sealed class DaktelaPaginator<T> : IAsyncEnumerable<T>
 {
-    private readonly DaktelaClient _client;
+    private readonly IDaktelaClient _client;
+    private readonly int _maxPages;
     private readonly string _endpoint;
     private readonly QueryBuilder _query;
     private readonly int _pageSize;
     private readonly int? _maxItems;
-    private readonly bool _stopOnError;
+    private readonly PaginationErrorMode _errorMode;
 
-    internal DaktelaPaginator(
-        DaktelaClient client,
+    /// <summary>
+    /// Creates a paginator over <paramref name="client"/>. Prefer
+    /// <see cref="IDaktelaClient.Paginate{T}"/>; this constructor exists so a substituted
+    /// <see cref="IDaktelaClient"/> can return a working paginator.
+    /// </summary>
+    public DaktelaPaginator(
+        IDaktelaClient client,
         string endpoint,
-        QueryBuilder? query,
-        int pageSize,
-        int? maxItems,
-        bool stopOnError)
+        QueryBuilder? query = null,
+        int pageSize = 100,
+        int? maxItems = null,
+        PaginationErrorMode errorMode = PaginationErrorMode.Throw,
+        int maxPages = DaktelaClient.ReadLimit)
     {
+        ArgumentNullException.ThrowIfNull(client);
+        if (maxPages <= 0)
+            throw new ArgumentOutOfRangeException(nameof(maxPages), "Maximum pages must be greater than zero.");
         if (string.IsNullOrWhiteSpace(endpoint))
             throw new ArgumentException("Endpoint cannot be null or empty.", nameof(endpoint));
         if (pageSize <= 0)
             throw new ArgumentOutOfRangeException(nameof(pageSize), "Page size must be greater than zero.");
         if (maxItems < 0)
             throw new ArgumentOutOfRangeException(nameof(maxItems), "Maximum items must be non-negative.");
+        if (!Enum.IsDefined(errorMode))
+            throw new ArgumentOutOfRangeException(nameof(errorMode), "Pagination error mode is invalid.");
 
         _client = client;
+        _maxPages = maxPages;
         _endpoint = endpoint;
         _query = query?.Clone() ?? new QueryBuilder();
         _pageSize = pageSize;
         _maxItems = maxItems ?? query?.GetTake();
-        _stopOnError = stopOnError;
+        _errorMode = errorMode;
     }
 
     /// <summary>
@@ -61,6 +74,9 @@ public sealed class DaktelaPaginator<T> : IAsyncEnumerable<T>
     /// <summary>
     /// Iterates over full page responses, including total and status metadata.
     /// </summary>
+    /// <exception cref="DaktelaPaginationLimitException">
+    /// The configured page limit was reached while more records may remain.
+    /// </exception>
     public async IAsyncEnumerable<DaktelaResponse<List<T>>> PagesAsync(
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
@@ -70,7 +86,7 @@ public sealed class DaktelaPaginator<T> : IAsyncEnumerable<T>
         var skip = _query.GetSkip() ?? 0;
         var returned = 0;
         var pageRequests = 0;
-        while (pageRequests++ < DaktelaClient.ReadLimit)
+        while (pageRequests++ < _maxPages)
         {
             var remaining = _maxItems.HasValue ? _maxItems.Value - returned : int.MaxValue;
             if (remaining <= 0)
@@ -86,11 +102,12 @@ public sealed class DaktelaPaginator<T> : IAsyncEnumerable<T>
                     pageQuery,
                     cancellationToken).ConfigureAwait(false);
             }
-            catch (DaktelaException) when (_stopOnError)
+            catch (DaktelaException) when (_errorMode == PaginationErrorMode.Stop)
             {
                 yield break;
             }
-            catch (DaktelaException)
+            catch (DaktelaException ex) when (
+                _errorMode == PaginationErrorMode.Skip && ex is not DaktelaUnauthorizedException)
             {
                 skip += requestedPageSize;
                 continue;
@@ -116,6 +133,10 @@ public sealed class DaktelaPaginator<T> : IAsyncEnumerable<T>
 
             skip += count;
         }
+
+        // Every complete result leaves the loop above, so reaching this point means the
+        // page limit cut the operation short.
+        throw new DaktelaPaginationLimitException(_maxPages);
     }
 
     /// <summary>

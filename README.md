@@ -18,6 +18,45 @@ Protocol details are documented in the
 dotnet add package Daktela.Connector
 ```
 
+## Upgrading from 1.2.0
+
+Version 1.3.0 removes no public members, but it stops hiding several failures. Check
+these if your application relied on the previous behavior:
+
+- **Paginator failures now throw.** `Paginate` and `IteratePagesAsync` previously ended
+  the enumeration silently when a page request failed, so an expired token looked like an
+  empty result. They now throw by default. Pass `PaginationErrorMode.Stop` or
+  `PaginationErrorMode.Skip` to opt back in. The overloads taking `bool stopOnError`
+  still work when every argument is supplied and are marked obsolete; a call that names
+  `stopOnError:` while omitting earlier arguments no longer compiles and should switch to
+  `errorMode:`.
+- **The page limit now throws.** Reaching the 999-page limit used to end a read as if it
+  were complete. It now throws `DaktelaPaginationLimitException`; raise
+  `DaktelaConfig.MaxPages` for larger reads.
+- **Configuration is captured at construction.** Changing `AccessToken`, `AuthMethod`, or
+  `UserAgentSuffix` on a `DaktelaConfig` after creating a client no longer affects that
+  client. Create a new client to rotate a token.
+- **Invalid header values fail at construction.** A `UserAgentSuffix` or access token that
+  cannot be written as an HTTP header throws `ArgumentException` from the constructor
+  instead of `FormatException` from every request.
+- **HTTP 403 throws `DaktelaForbiddenException`**, which derives from `DaktelaException`.
+- **The request timeout covers the response body**, and a connection failure while
+  reading the body throws `DaktelaConnectionException` and follows the retry policy.
+- **The connector's own HTTP transport no longer stores cookies** and recycles pooled
+  connections every five minutes. An injected `HttpClient` is unaffected.
+- `Filter.In` / `Filter.NotIn` given one collection (`int[]`, `List<string>`, ...) now
+  encode its elements instead of a nested list.
+- Empty-string and `0000-00-00` date values deserialize to null for `DateTime?` and
+  `DateTimeOffset?` properties.
+
+- `DaktelaConfig.AccessToken` is no longer a `required` member, because a client can log
+  in with `DaktelaConfig.Login` instead. Exactly one of the two must be set.
+- Secrets are redacted from exceptions; see [Secrets in errors](#secrets-in-errors).
+
+New options are `Login`, `ServerTimeZone`, `IncludeNullValues`, and `MaxPages`, and the
+client now implements `IDaktelaClient`. The full list is in the
+[changelog](https://github.com/Daktela/daktela-v6-dotnet-connector/blob/main/CHANGELOG.md).
+
 ## Upgrading from 1.1.0
 
 Version 1.2.0 substantially expands the connector without removing or renaming
@@ -109,9 +148,15 @@ var config = new DaktelaConfig
     VerifySsl = true,
     RetryPolicy = RetryPolicy.Default,
     RateLimitPolicy = new RateLimitPolicy(),
-    UserAgentSuffix = "MyApplication/2.0"
+    UserAgentSuffix = "MyApplication/2.0",
+    ServerTimeZone = TimeZoneInfo.FindSystemTimeZoneById("Europe/Prague"),
+    IncludeNullValues = false,
+    MaxPages = 999
 };
 ```
+
+The configuration is read once, when the client is created. `UserAgentSuffix` must be a
+valid User-Agent value made of ASCII product tokens such as `MyApp/2.0`.
 
 The authentication methods are:
 
@@ -121,6 +166,79 @@ The authentication methods are:
 
 Keep `VerifySsl` enabled in production. It applies when the connector creates its
 own HTTP transport.
+
+### Logging in with a username and password
+
+Use a static access token for integrations where you can. Where you cannot, the connector
+can start a session with a username and password instead:
+
+```csharp
+using Daktela.Connector.Auth;
+
+var config = new DaktelaConfig
+{
+    InstanceUrl = "https://your-instance.daktela.com",
+    Login = new DaktelaLogin("john.doe", password)
+};
+
+using var client = new DaktelaClient(config);
+```
+
+Set either `AccessToken` or `Login`, not both. The connector logs in on the first request,
+refreshes the short-lived access token a minute before it expires, and logs in again when
+the session has ended. When the server answers HTTP 401, the token is renewed and the
+request is sent once more; the server answers 401 before it processes a request, so the
+request is not executed twice.
+
+Each login starts a new session on the Daktela server. To reuse one session across
+clients or processes, pass an `ITokenStore`. `InMemoryTokenStore` shares a session within
+a process; implement the interface over your cache or database to share it further:
+
+```csharp
+public sealed class FileTokenStore(string path) : ITokenStore
+{
+    private sealed record Saved(string AccessToken, string RefreshToken, string? Owner);
+
+    public async ValueTask<TokenSet?> LoadAsync(CancellationToken cancellationToken = default)
+    {
+        if (!File.Exists(path))
+            return null;
+        var saved = JsonSerializer.Deserialize<Saved>(await File.ReadAllTextAsync(path, cancellationToken));
+        return saved == null ? null : new TokenSet(saved.AccessToken, saved.RefreshToken, saved.Owner);
+    }
+
+    public async ValueTask SaveAsync(TokenSet tokens, CancellationToken cancellationToken = default)
+        => await File.WriteAllTextAsync(
+            path,
+            JsonSerializer.Serialize(new Saved(tokens.AccessToken, tokens.RefreshToken, tokens.Owner)),
+            cancellationToken);
+}
+
+config.Login = new DaktelaLogin("john.doe", password, new FileTokenStore("/var/lib/myapp/daktela-tokens.json"));
+```
+
+- The password is kept in memory to log in again; the connector never stores it.
+- Saved tokens record the user and instance they belong to (`TokenSet.Owner`). Tokens of
+  another user or instance are ignored and the connector logs in, so one store can be
+  shared safely. A store that throws does not fail the request: the connector logs in when
+  loading fails and keeps the tokens in memory when saving fails.
+- Refresh tokens are long-lived credentials. Store them as securely as passwords, and use
+  an `https://` instance URL with `VerifySsl` enabled.
+- After the server rejects the credentials (HTTP 400 or 401), the client sends no further
+  login, which could lock the account. Its requests then fail with the status of the
+  rejected login; create a new client with valid credentials.
+- A client that logs in does not follow redirects on its own transport, because a redirect
+  would forward the credentials to its target. Disable automatic redirects on an injected
+  `HttpClient` yourself.
+- Accounts with two-factor authentication cannot log in this way. Use a static token.
+
+### Secrets in errors
+
+The connector removes the access token, the session's access and refresh tokens, and
+(while a login is sent) the password from exception messages, `ResponseBody`, and
+`Errors`, in their plain, URL-encoded, and JSON-escaped forms. An underlying exception
+that quotes one of them is not chained as `InnerException`. Successful response data is
+never altered.
 
 ### HttpClientFactory and dependency injection
 
@@ -134,6 +252,14 @@ using var client = new DaktelaClient(config, httpClient);
 ```
 
 `DaktelaConfig.Timeout` still applies to an injected client.
+
+`DaktelaClient` implements `IDaktelaClient`. Register and depend on the interface so the
+client can be substituted in tests:
+
+```csharp
+services.AddSingleton<IDaktelaClient>(sp =>
+    new DaktelaClient(config, sp.GetRequiredService<IHttpClientFactory>().CreateClient("daktela")));
+```
 
 ## CRUD operations
 
@@ -211,6 +337,9 @@ var query = new QueryBuilder()
     .Filter(Filter.In("role", "admin", "manager"));
 ```
 
+`Filter.In` and `Filter.NotIn` accept either inline values or one collection, such as
+`Filter.In("id", ids)` for an `int[]` or `List<int>`.
+
 ### AND and OR groups
 
 Top-level filters use AND logic. Use groups for explicit nested logic:
@@ -267,7 +396,11 @@ await foreach (var user in client.IterateAsync<User>("users", query, pageSize: 1
 
 `IterateAsync` respects an existing `Skip` and `Take`, handles Daktela instances
 that cap pages below the requested size, stops at the response total, and accepts a
-cancellation token. Unbounded reads have a 999-page safety limit.
+cancellation token. A failed page request throws.
+
+One pagination operation makes at most `DaktelaConfig.MaxPages` page requests (999 by
+default). If the limit is reached while more records may remain, a
+`DaktelaPaginationLimitException` is thrown rather than returning a truncated result.
 
 For reusable collection and page helpers, create a paginator:
 
@@ -277,7 +410,7 @@ var paginator = client.Paginate<User>(
     query,
     pageSize: 100,
     maxItems: 1_000,
-    stopOnError: true);
+    errorMode: PaginationErrorMode.Throw);
 
 var users = await paginator.ToListAsync();
 var count = await paginator.CountAsync();
@@ -299,6 +432,13 @@ await foreach (var page in paginator.PagesAsync())
 `ToArrayAsync`, `FirstAsync`, and `EachAsync` are convenience aliases. Each
 enumeration performs a fresh set of requests; paginator results are not cached.
 
+`errorMode` decides what happens when a page request fails:
+
+- `Throw` (default) propagates the exception.
+- `Stop` ends the enumeration silently, so a failure is indistinguishable from a
+  complete result.
+- `Skip` skips the failed page and continues. Authentication failures still throw.
+
 ## Health checks
 
 `PingAsync` returns a simple boolean. `HealthCheckAsync` returns authenticated
@@ -317,7 +457,30 @@ The client reads both ISO 8601 values and Daktela's `yyyy-MM-dd HH:mm:ss` format
 It writes `DateTime` and `DateTimeOffset` values in Daktela format. Property names
 are matched case-insensitively and request properties default to camel case.
 Daktela values without an explicit offset are server-local wall-clock values and
-deserialize with `DateTimeKind.Unspecified`.
+deserialize with `DateTimeKind.Unspecified`. An empty string or a `0000-00-00` value
+deserializes to null for a nullable `DateTime?` / `DateTimeOffset?` property.
+
+Daktela does not transmit a time zone, so set `ServerTimeZone` when you work with
+instants rather than wall-clock values:
+
+```csharp
+config.ServerTimeZone = TimeZoneInfo.FindSystemTimeZoneById("Europe/Prague");
+```
+
+With it set, `DateTimeOffset` values and `DateTime` values of kind `Utc` or `Local` are
+converted to the server's wall-clock time in request bodies and query filters, and
+offset-less values read into a `DateTimeOffset` receive the server's offset. `DateTime`
+values of kind `Unspecified` are always sent unchanged. Without it, values are sent as
+written and an offset-less value read into a `DateTimeOffset` assumes the time zone of
+the machine running the connector, which is wrong whenever that differs from the server.
+
+Null properties of a request body are omitted by default. To clear a field by sending an
+explicit `null`, enable `IncludeNullValues`:
+
+```csharp
+config.IncludeNullValues = true;
+await client.PutAsync("contacts", "12345", new { email = (string?)null });
+```
 
 You can supply serializer options; the connector copies them and adds its Daktela
 converters:
@@ -390,6 +553,10 @@ try
 catch (DaktelaUnauthorizedException)
 {
     // HTTP 401
+}
+catch (DaktelaForbiddenException)
+{
+    // HTTP 403
 }
 catch (DaktelaNotFoundException)
 {

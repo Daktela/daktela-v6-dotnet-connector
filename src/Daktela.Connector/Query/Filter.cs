@@ -1,3 +1,5 @@
+using System.Collections;
+
 namespace Daktela.Connector.Query;
 
 /// <summary>
@@ -101,12 +103,24 @@ public class Filter
     public static Filter IsNotNull(string field) => new(field, FilterOperator.IsNotNull, string.Empty);
 
     /// <summary>
-    /// Creates an IN filter.
+    /// Creates an IN filter. Values may be listed inline or supplied as a single collection.
     /// </summary>
-    public static Filter In(string field, params object[] values) => new(field, FilterOperator.In, values);
+    public static Filter In(string field, params object[] values)
+        => new(field, FilterOperator.In, FlattenValues(values));
 
     /// <summary>
-    /// Creates a NOT IN filter.
+    /// Creates a NOT IN filter. Values may be listed inline or supplied as a single collection.
     /// </summary>
-    public static Filter NotIn(string field, params object[] values) => new(field, FilterOperator.NotIn, values);
+    public static Filter NotIn(string field, params object[] values)
+        => new(field, FilterOperator.NotIn, FlattenValues(values));
+
+    // A collection that is not an object[] (int[], List<string>, ...) binds to the params
+    // array as one element. Unwrap it so it encodes as value[0], value[1], ...
+    private static object[] FlattenValues(object[] values)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        if (values is [IEnumerable collection and not string and not IDictionary])
+            return collection.Cast<object>().ToArray();
+        return values;
+    }
 }

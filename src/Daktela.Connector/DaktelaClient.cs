@@ -13,16 +13,17 @@ namespace Daktela.Connector;
 /// <summary>
 /// Client for interacting with the Daktela V6 API.
 /// </summary>
-public class DaktelaClient : IDisposable
+public class DaktelaClient : IDaktelaClient
 {
     /// <summary>
-    /// Maximum number of pages read by an unbounded pagination operation.
-    /// Prevents an unbounded pagination operation from making unlimited requests.
+    /// Default for <see cref="DaktelaConfig.MaxPages"/>: the number of page requests one
+    /// pagination operation may make before it fails rather than run without bound.
     /// </summary>
     public const int ReadLimit = 999;
 
     private readonly HttpCommunicator _communicator;
     private readonly JsonSerializerOptions _jsonOptions;
+    private readonly TimeZoneInfo? _serverTimeZone;
     private bool _disposed;
 
     /// <summary>
@@ -44,11 +45,23 @@ public class DaktelaClient : IDisposable
     {
     }
 
+    /// <summary>
+    /// Creates a client whose login session reads the time from <paramref name="timeProvider"/>.
+    /// </summary>
+    internal DaktelaClient(DaktelaConfig config, HttpClient httpClient, TimeProvider timeProvider)
+        : this(CreateCommunicator(config, httpClient, timeProvider))
+    {
+    }
+
     private DaktelaClient(ClientDependencies dependencies)
     {
         _jsonOptions = dependencies.JsonOptions;
         _communicator = dependencies.Communicator;
+        _serverTimeZone = dependencies.ServerTimeZone;
+        MaxPages = dependencies.MaxPages;
     }
+
+    internal int MaxPages { get; }
 
     /// <summary>
     /// Checks the authenticated <c>whoim</c> endpoint.
@@ -428,7 +441,8 @@ public class DaktelaClient : IDisposable
     }
 
     /// <summary>
-    /// Iterates through all records, handling pagination automatically.
+    /// Iterates through all records, handling pagination automatically. A failed page
+    /// request throws.
     /// </summary>
     public async IAsyncEnumerable<T> IterateAsync<T>(
         string endpoint,
@@ -436,74 +450,69 @@ public class DaktelaClient : IDisposable
         int pageSize = 100,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        if (pageSize <= 0)
-            throw new ArgumentOutOfRangeException(nameof(pageSize), "Page size must be greater than zero.");
-
-        var baseQuery = query?.Clone() ?? new QueryBuilder();
-        var skip = query?.GetSkip() ?? 0;
-        var maxRecords = query?.GetTake();
-        if (maxRecords == 0)
-            yield break;
-
-        var recordsReturned = 0;
-        var pageRequests = 0;
-        while (pageRequests++ < ReadLimit)
-        {
-            var remaining = maxRecords.HasValue ? maxRecords.Value - recordsReturned : int.MaxValue;
-            if (remaining <= 0)
-                yield break;
-
-            var requestedPageSize = Math.Min(pageSize, remaining);
-            var pageQuery = baseQuery.WithTake(requestedPageSize).WithSkip(skip);
-            var response = await GetAsync<T>(endpoint, pageQuery, cancellationToken).ConfigureAwait(false);
-
-            if (response.Data == null || response.Data.Count == 0)
-                yield break;
-
-            foreach (var item in response.Data)
-            {
-                yield return item;
-                recordsReturned++;
-                if (maxRecords.HasValue && recordsReturned >= maxRecords.Value)
-                    yield break;
-            }
-
-            // Daktela defaults a missing envelope total to 1. Treat total as an
-            // authoritative pagination boundary only when it matches the page position.
-            var reachedTotal = response.Total.HasValue &&
-                               skip + response.Data.Count == response.Total.Value;
-            if (reachedTotal)
-                yield break;
-            if (!response.Total.HasValue && response.Data.Count < requestedPageSize)
-                yield break;
-
-            skip += response.Data.Count;
-        }
+        var paginator = Paginate<T>(endpoint, query, pageSize);
+        await foreach (var item in paginator.ItemsAsync(cancellationToken).ConfigureAwait(false))
+            yield return item;
     }
 
     /// <summary>
     /// Creates a reusable paginator with item, page, collection, filtering, and mapping helpers.
+    /// A failed page request throws unless another <paramref name="errorMode"/> is chosen.
     /// </summary>
     public DaktelaPaginator<T> Paginate<T>(
         string endpoint,
         QueryBuilder? query = null,
         int pageSize = 100,
         int? maxItems = null,
-        bool stopOnError = true)
-        => new(this, endpoint, query, pageSize, maxItems, stopOnError);
+        PaginationErrorMode errorMode = PaginationErrorMode.Throw)
+        => new(this, endpoint, query, pageSize, maxItems, errorMode, MaxPages);
+
+    /// <summary>
+    /// Creates a paginator that silently stops (<c>true</c>) or skips the page
+    /// (<c>false</c>) when a page request fails.
+    /// </summary>
+    [Obsolete("Use the overload taking PaginationErrorMode. Pass PaginationErrorMode.Stop or " +
+              "PaginationErrorMode.Skip to keep hiding failed page requests; the default now throws.")]
+    public DaktelaPaginator<T> Paginate<T>(
+        string endpoint,
+        QueryBuilder? query,
+        int pageSize,
+        int? maxItems,
+        bool stopOnError)
+        => Paginate<T>(endpoint, query, pageSize, maxItems, ToErrorMode(stopOnError));
 
     /// <summary>
     /// Iterates over full page responses rather than individual records.
+    /// A failed page request throws unless another <paramref name="errorMode"/> is chosen.
     /// </summary>
     public IAsyncEnumerable<DaktelaResponse<List<T>>> IteratePagesAsync<T>(
         string endpoint,
         QueryBuilder? query = null,
         int pageSize = 100,
         int? maxItems = null,
-        bool stopOnError = true,
+        PaginationErrorMode errorMode = PaginationErrorMode.Throw,
         CancellationToken cancellationToken = default)
-        => Paginate<T>(endpoint, query, pageSize, maxItems, stopOnError)
+        => Paginate<T>(endpoint, query, pageSize, maxItems, errorMode)
             .PagesAsync(cancellationToken);
+
+    /// <summary>
+    /// Iterates over full page responses, silently stopping (<c>true</c>) or skipping the
+    /// page (<c>false</c>) when a page request fails.
+    /// </summary>
+    [Obsolete("Use the overload taking PaginationErrorMode. Pass PaginationErrorMode.Stop or " +
+              "PaginationErrorMode.Skip to keep hiding failed page requests; the default now throws.")]
+    public IAsyncEnumerable<DaktelaResponse<List<T>>> IteratePagesAsync<T>(
+        string endpoint,
+        QueryBuilder? query,
+        int pageSize,
+        int? maxItems,
+        bool stopOnError,
+        CancellationToken cancellationToken = default)
+        => IteratePagesAsync<T>(
+            endpoint, query, pageSize, maxItems, ToErrorMode(stopOnError), cancellationToken);
+
+    private static PaginationErrorMode ToErrorMode(bool stopOnError)
+        => stopOnError ? PaginationErrorMode.Stop : PaginationErrorMode.Skip;
 
     private async Task<DaktelaResponse<T>> ProcessResponseAsync<T>(
         HttpResponseMessage response,
@@ -660,63 +669,13 @@ public class DaktelaClient : IDisposable
         return null;
     }
 
-    private static void ThrowOnError(
+    private void ThrowOnError(
         HttpResponseMessage response,
         string body,
         IReadOnlyList<DaktelaError> errors)
     {
-        if (response.IsSuccessStatusCode)
-            return;
-
-        var statusCode = (int)response.StatusCode;
-        var detail = string.Join("; ", errors
-            .Select(error => error.Message)
-            .Where(message => !string.IsNullOrWhiteSpace(message)));
-        var suffix = string.IsNullOrEmpty(detail) ? string.Empty : $" {detail}";
-
-        throw response.StatusCode switch
-        {
-            HttpStatusCode.Unauthorized => new DaktelaUnauthorizedException(
-                "Authentication failed. Check your access token." + suffix,
-                body,
-                errors),
-
-            HttpStatusCode.NotFound => new DaktelaNotFoundException(
-                "The requested resource was not found." + suffix,
-                body,
-                errors),
-
-            HttpStatusCode.TooManyRequests => CreateRateLimitException(response, body, errors),
-
-            HttpStatusCode.BadRequest or HttpStatusCode.UnprocessableEntity =>
-                new DaktelaValidationException(
-                    "Validation failed." + suffix,
-                    errors,
-                    statusCode,
-                    body),
-
-            _ => new DaktelaException(
-                $"API request failed with status {statusCode}." + suffix,
-                statusCode,
-                body,
-                errors)
-        };
-    }
-
-    private static DaktelaRateLimitException CreateRateLimitException(
-        HttpResponseMessage response,
-        string body,
-        IReadOnlyList<DaktelaError> errors)
-    {
-        TimeSpan? retryAfter = null;
-        if (response.Headers.TryGetValues("Retry-After", out var values))
-            retryAfter = RateLimitHandler.ParseRetryAfter(values.FirstOrDefault());
-
-        return new DaktelaRateLimitException(
-            "Rate limit exceeded. Please wait before retrying.",
-            retryAfter,
-            body,
-            errors);
+        if (!response.IsSuccessStatusCode)
+            throw ResponseErrors.Create(response, body, errors, _communicator.Redactor);
     }
 
     private static DaktelaException CreateSerializationException(
@@ -732,7 +691,7 @@ public class DaktelaClient : IDisposable
     {
         if (string.IsNullOrWhiteSpace(endpoint))
             throw new ArgumentException("Endpoint cannot be null or empty.", nameof(endpoint));
-        if (Uri.TryCreate(endpoint, UriKind.Absolute, out _))
+        if (HttpCommunicator.IsAbsoluteUrl(endpoint))
             throw new ArgumentException("Endpoint must be relative.", nameof(endpoint));
         if (endpoint.Contains('?') || endpoint.Contains('#'))
             throw new ArgumentException(
@@ -761,11 +720,11 @@ public class DaktelaClient : IDisposable
         return char.ToLowerInvariant(path[0]) + path[1..];
     }
 
-    private static string AppendQuery(string url, QueryBuilder? query)
+    private string AppendQuery(string url, QueryBuilder? query)
     {
         if (query == null)
             return url;
-        var queryString = query.Build();
+        var queryString = query.Build(_serverTimeZone);
         if (string.IsNullOrEmpty(queryString))
             return url;
         return url + (url.Contains('?') ? "&" : "?") + queryString;
@@ -776,14 +735,20 @@ public class DaktelaClient : IDisposable
         ArgumentNullException.ThrowIfNull(config);
         if (string.IsNullOrWhiteSpace(config.InstanceUrl))
             throw new ArgumentException("Instance URL is required.", nameof(config));
-        if (string.IsNullOrWhiteSpace(config.AccessToken))
-            throw new ArgumentException("Access token is required.", nameof(config));
+        if (config.Login == null && string.IsNullOrWhiteSpace(config.AccessToken))
+            throw new ArgumentException("An access token or a login is required.", nameof(config));
+        if (config.Login != null && !string.IsNullOrEmpty(config.AccessToken))
+            throw new ArgumentException("Set either an access token or a login, not both.", nameof(config));
         if (config.Timeout <= TimeSpan.Zero && config.Timeout != Timeout.InfiniteTimeSpan)
             throw new ArgumentOutOfRangeException(nameof(config), "Timeout must be positive or infinite.");
         if (!Enum.IsDefined(config.AuthMethod))
             throw new ArgumentOutOfRangeException(nameof(config), "Authentication method is invalid.");
+        if (config.MaxPages <= 0)
+            throw new ArgumentOutOfRangeException(nameof(config), "Maximum pages must be greater than zero.");
         config.RetryPolicy?.Validate();
         config.RateLimitPolicy?.Validate();
+        if (config.AccessToken.Any(char.IsControl))
+            throw new ArgumentException("Access token cannot contain control characters.", nameof(config));
         if (config.UserAgentSuffix?.Any(char.IsControl) == true)
             throw new ArgumentException("User-Agent suffix cannot contain control characters.", nameof(config));
         _ = config.GetBaseUrl();
@@ -791,13 +756,19 @@ public class DaktelaClient : IDisposable
 
     private static ClientDependencies CreateCommunicator(
         DaktelaConfig config,
-        HttpClient? httpClient)
+        HttpClient? httpClient,
+        TimeProvider? timeProvider = null)
     {
         ValidateConfig(config);
-        var jsonOptions = DaktelaJson.CreateOptions(config.JsonSerializerOptions);
+        var jsonOptions = DaktelaJson.CreateOptions(
+            config.JsonSerializerOptions,
+            config.ServerTimeZone,
+            config.IncludeNullValues);
         return new ClientDependencies(
-            new HttpCommunicator(config, jsonOptions, httpClient),
-            jsonOptions);
+            new HttpCommunicator(config, jsonOptions, httpClient, timeProvider),
+            jsonOptions,
+            config.ServerTimeZone,
+            config.MaxPages);
     }
 
     public void Dispose()
@@ -838,5 +809,7 @@ public class DaktelaClient : IDisposable
 
     private sealed record ClientDependencies(
         HttpCommunicator Communicator,
-        JsonSerializerOptions JsonOptions);
+        JsonSerializerOptions JsonOptions,
+        TimeZoneInfo? ServerTimeZone,
+        int MaxPages);
 }
