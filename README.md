@@ -42,8 +42,10 @@ these if your application relied on the previous behavior:
 - **HTTP 403 throws `DaktelaForbiddenException`**, which derives from `DaktelaException`.
 - **The request timeout covers the response body**, and a connection failure while
   reading the body throws `DaktelaConnectionException` and follows the retry policy.
-- **The connector's own HTTP transport no longer stores cookies** and recycles pooled
-  connections every five minutes. An injected `HttpClient` is unaffected.
+- **The connector's own HTTP transport no longer follows redirects or stores cookies**,
+  and recycles pooled connections every five minutes. An instance URL that relied on a
+  redirect, such as `http://` to `https://`, must be changed to the final URL. See
+  [Redirects](#redirects).
 - `Filter.In` / `Filter.NotIn` given one collection (`int[]`, `List<string>`, ...) now
   encode its elements instead of a nested list.
 - Empty-string and `0000-00-00` date values deserialize to null for `DateTime?` and
@@ -227,10 +229,19 @@ config.Login = new DaktelaLogin("john.doe", password, new FileTokenStore("/var/l
 - After the server rejects the credentials (HTTP 400 or 401), the client sends no further
   login, which could lock the account. Its requests then fail with the status of the
   rejected login; create a new client with valid credentials.
-- A client that logs in does not follow redirects on its own transport, because a redirect
-  would forward the credentials to its target. Disable automatic redirects on an injected
-  `HttpClient` yourself.
+- Redirects are never followed for a login; see [Redirects](#redirects).
 - Accounts with two-factor authentication cannot log in this way. Use a static token.
+
+### Redirects
+
+The connector's own HTTP transport does not follow redirects, because a redirect would
+forward the access token, and the username and password of a login, to its target. A 3xx
+response throws a `DaktelaException` that names the target; set `InstanceUrl` to the final
+URL of the instance, for example `https://` rather than `http://`.
+
+An injected `HttpClient` follows redirects unless you disable them on its handler
+(`AllowAutoRedirect = false`), which you should. The connector cannot stop such a client,
+but when a redirect led to another origin it throws instead of using the response.
 
 ### Secrets in errors
 

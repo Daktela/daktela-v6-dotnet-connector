@@ -67,9 +67,9 @@ internal sealed class HttpCommunicator : IDisposable
             PooledConnectionLifetime = TimeSpan.FromMinutes(5),
             // The API is token-authenticated; do not carry server cookies between requests.
             UseCookies = false,
-            // A redirect would forward the login payload and the access token header to its
-            // target, so a client that logs in with credentials does not follow redirects.
-            AllowAutoRedirect = _session == null
+            // A redirect would forward the access token, and the payload of a login, to its
+            // target. A 3xx response is reported as an error instead.
+            AllowAutoRedirect = false
         };
         if (!config.VerifySsl)
             handler.SslOptions.RemoteCertificateValidationCallback = static (_, _, _, _) => true;
@@ -144,6 +144,8 @@ internal sealed class HttpCommunicator : IDisposable
                     attempt++;
                     continue;
                 }
+
+                ThrowIfRedirectedToAnotherOrigin(request.RequestUri!, response);
 
                 // Read the body inside the timeout and error handling so a stalled or broken
                 // body is reported and retried exactly like a stalled or broken request.
@@ -323,6 +325,30 @@ internal sealed class HttpCommunicator : IDisposable
     /// </summary>
     internal static bool IsAbsoluteUrl(string value)
         => !value.StartsWith('/') && Uri.TryCreate(value, UriKind.Absolute, out _);
+
+    /// <summary>
+    /// An injected <see cref="HttpClient"/> may follow redirects. When one led to another
+    /// origin, the access token or login payload went with it, so the response is not used.
+    /// </summary>
+    private void ThrowIfRedirectedToAnotherOrigin(Uri requested, HttpResponseMessage response)
+    {
+        var final = response.RequestMessage?.RequestUri;
+        if (final == null ||
+            !final.IsAbsoluteUri ||
+            Uri.Compare(requested, final, UriComponents.SchemeAndServer, UriFormat.Unescaped,
+                StringComparison.OrdinalIgnoreCase) == 0)
+        {
+            return;
+        }
+
+        var status = (int)response.StatusCode;
+        response.Dispose();
+        throw new DaktelaException(
+            $"The request was redirected to another origin ({final.GetLeftPart(UriPartial.Authority)}), " +
+            "which received the request's credentials. Disable automatic redirects on the supplied " +
+            "HttpClient and set InstanceUrl to the final URL of the Daktela instance.",
+            status);
+    }
 
     private static Task BufferContentAsync(HttpResponseMessage response, CancellationToken cancellationToken)
     {

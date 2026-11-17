@@ -31,6 +31,12 @@ All notable changes to this project are documented in this file. The format foll
   that quotes the request URL, which carries the token with query parameter
   authentication, is redacted and its underlying exception is not chained.
 
+- Stopped following redirects on the connector's own transport, which forwarded the
+  `X-AUTH-TOKEN` header to the redirect target, including one on another host. A 3xx
+  response now throws a `DaktelaException` naming the target. With an injected `HttpClient`
+  that followed a redirect to another origin, the connector throws instead of using the
+  response.
+
 ### Added
 
 - `DaktelaConfig.Login` with `DaktelaLogin`, `ITokenStore`, `InMemoryTokenStore`, and

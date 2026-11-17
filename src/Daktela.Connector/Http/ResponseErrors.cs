@@ -26,6 +26,14 @@ internal static class ResponseErrors
             .Select(error => error.Message)
             .Where(message => !string.IsNullOrWhiteSpace(message)));
         var suffix = string.IsNullOrEmpty(detail) ? string.Empty : $" {detail}";
+        if (statusCode is >= 300 and < 400 && response.Headers.Location is { } location)
+        {
+            // The location may repeat the query, which carries the token with query
+            // parameter authentication.
+            suffix += $" The server redirected the request to {redactor.Redact(location.OriginalString)}. " +
+                      "Redirects are not followed, because they would forward the access token; " +
+                      "set InstanceUrl to the final URL of the Daktela instance.";
+        }
 
         return response.StatusCode switch
         {
