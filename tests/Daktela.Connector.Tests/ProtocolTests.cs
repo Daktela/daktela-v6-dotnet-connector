@@ -729,7 +729,7 @@ public class ProtocolTests
         var result = await client.Paginate<UserDto>(
             "users",
             pageSize: 2,
-            stopOnError: false).ToListAsync();
+            errorMode: PaginationErrorMode.Skip).ToListAsync();
 
         Assert.Equal("recovered", Assert.Single(result).Name);
         Assert.Equal(2, handler.Requests.Count);
@@ -737,13 +737,15 @@ public class ProtocolTests
     }
 
     [Fact]
-    public async Task Paginator_StopsOnFailedPageByDefault()
+    public async Task Paginator_StopsOnFailedPageWhenConfigured()
     {
         using var handler = RecordingHandler.ReturnJson("{}", HttpStatusCode.InternalServerError);
         using var httpClient = new HttpClient(handler);
         using var client = CreateClient(httpClient);
 
-        var result = await client.Paginate<UserDto>("users").ToListAsync();
+        var result = await client
+            .Paginate<UserDto>("users", errorMode: PaginationErrorMode.Stop)
+            .ToListAsync();
 
         Assert.Empty(result);
         Assert.Single(handler.Requests);

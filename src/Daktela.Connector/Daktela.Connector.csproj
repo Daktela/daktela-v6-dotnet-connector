@@ -8,7 +8,7 @@
 
     <!-- NuGet Package Metadata -->
     <PackageId>Daktela.Connector</PackageId>
-    <Version>1.2.0</Version>
+    <Version>1.3.0</Version>
     <Authors>Daktela</Authors>
     <Company>Daktela</Company>
     <Description>Typed .NET client for the Daktela V6 API with filtering, pagination, retries, rate limits, health checks, and structured errors.</Description>
@@ -18,12 +18,22 @@
     <RepositoryUrl>https://github.com/Daktela/daktela-v6-dotnet-connector</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageReadmeFile>README.md</PackageReadmeFile>
-    <PackageReleaseNotes>Adds raw CRUD paths, paginator helpers, health checks, rate-limit policy, retry configuration, response helpers, phone formatting, User-Agent customization, and canonical filter encoding. See the README upgrade notes.</PackageReleaseNotes>
+    <PackageReleaseNotes>See https://github.com/Daktela/daktela-v6-dotnet-connector/blob/main/CHANGELOG.md</PackageReleaseNotes>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
 
     <!-- Enable XML documentation -->
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
+
+    <!-- Symbols and source linking for debugging into the package -->
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+
+    <!-- Fail the pack when a public member of the baseline release is removed or changed -->
+    <EnablePackageValidation>true</EnablePackageValidation>
+    <PackageValidationBaselineVersion>1.2.0</PackageValidationBaselineVersion>
   </PropertyGroup>
 
   <!-- Expose internal members to test project -->

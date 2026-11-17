@@ -1,3 +1,4 @@
+using Daktela.Connector.Auth;
 using Daktela.Connector.Http;
 using System.Text.Json;
 
@@ -14,9 +15,16 @@ public class DaktelaConfig
     public required string InstanceUrl { get; set; }
 
     /// <summary>
-    /// The API access token for authentication.
+    /// The static API access token for authentication. Set either this or <see cref="Login"/>.
     /// </summary>
-    public required string AccessToken { get; set; }
+    public string AccessToken { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Username and password to start a session with instead of a static
+    /// <see cref="AccessToken"/>. The connector logs in on the first request and keeps the
+    /// session's short-lived access token fresh.
+    /// </summary>
+    public DaktelaLogin? Login { get; set; }
 
     /// <summary>
     /// The authentication method to use. Default is Header.
@@ -54,6 +62,31 @@ public class DaktelaConfig
     /// converters for Daktela date/time values.
     /// </summary>
     public JsonSerializerOptions? JsonSerializerOptions { get; set; }
+
+    /// <summary>
+    /// Time zone of the Daktela server. Daktela exchanges date/time values as server-local
+    /// wall-clock time without an offset. When set, <see cref="DateTimeOffset"/> values and
+    /// <see cref="DateTime"/> values of kind <see cref="DateTimeKind.Utc"/> or
+    /// <see cref="DateTimeKind.Local"/> are converted to this zone when sent, and values read
+    /// into a <see cref="DateTimeOffset"/> receive this zone's offset. When null (default),
+    /// values are sent as written and offset-less values read into a
+    /// <see cref="DateTimeOffset"/> assume the zone of the machine running the connector.
+    /// </summary>
+    public TimeZoneInfo? ServerTimeZone { get; set; }
+
+    /// <summary>
+    /// Whether null properties of a request body are sent as JSON <c>null</c>. Default is
+    /// false, which omits them. Enable this to clear a field by sending an explicit null.
+    /// </summary>
+    public bool IncludeNullValues { get; set; }
+
+    /// <summary>
+    /// Maximum number of page requests made by one pagination operation. When the limit is
+    /// reached while more records may remain, a
+    /// <see cref="Exceptions.DaktelaPaginationLimitException"/> is thrown.
+    /// Default is <see cref="DaktelaClient.ReadLimit"/>.
+    /// </summary>
+    public int MaxPages { get; set; } = DaktelaClient.ReadLimit;
 
     /// <summary>
     /// Gets the base URL for API requests.

@@ -6,7 +6,10 @@ namespace Daktela.Connector.Serialization;
 
 internal static class DaktelaJson
 {
-    public static JsonSerializerOptions CreateOptions(JsonSerializerOptions? configuredOptions)
+    public static JsonSerializerOptions CreateOptions(
+        JsonSerializerOptions? configuredOptions,
+        TimeZoneInfo? serverTimeZone = null,
+        bool includeNullValues = false)
     {
         var options = configuredOptions == null
             ? new JsonSerializerOptions()
@@ -14,15 +17,24 @@ internal static class DaktelaJson
 
         options.PropertyNamingPolicy ??= JsonNamingPolicy.CamelCase;
         options.PropertyNameCaseInsensitive = true;
-        options.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull;
+        options.DefaultIgnoreCondition = includeNullValues
+            ? JsonIgnoreCondition.Never
+            : JsonIgnoreCondition.WhenWritingNull;
         options.NumberHandling |= JsonNumberHandling.AllowReadingFromString;
 
-        if (!options.Converters.Any(converter => converter is DaktelaDateTimeConverter))
-            options.Converters.Add(new DaktelaDateTimeConverter());
-        if (!options.Converters.Any(converter => converter is DaktelaDateTimeOffsetConverter))
-            options.Converters.Add(new DaktelaDateTimeOffsetConverter());
+        AddConverter(options, new DaktelaDateTimeConverter(serverTimeZone));
+        AddConverter(options, new DaktelaNullableDateTimeConverter(serverTimeZone));
+        AddConverter(options, new DaktelaDateTimeOffsetConverter(serverTimeZone));
+        AddConverter(options, new DaktelaNullableDateTimeOffsetConverter(serverTimeZone));
 
         return options;
+    }
+
+    private static void AddConverter<TConverter>(JsonSerializerOptions options, TConverter converter)
+        where TConverter : JsonConverter
+    {
+        if (!options.Converters.Any(existing => existing is TConverter))
+            options.Converters.Add(converter);
     }
 
     public static List<DaktelaError> ParseErrors(JsonElement root)
