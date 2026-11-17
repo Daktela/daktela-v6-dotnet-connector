@@ -76,6 +76,62 @@ public class RedactionTests
     }
 
     [Fact]
+    public async Task RedirectResponse_IsAnErrorNamingTheTargetWithoutTheToken()
+    {
+        var handler = new StubHandler((_, request) =>
+        {
+            var response = StubHandler.Response(string.Empty, HttpStatusCode.MovedPermanently);
+            response.Headers.Location = new Uri("https://other.test" + request.RequestUri!.PathAndQuery);
+            return response;
+        });
+        using var client = handler.CreateClient(config =>
+        {
+            config.AccessToken = Token;
+            config.AuthMethod = AuthMethod.QueryParam;
+        });
+
+        var exception = await Assert.ThrowsAsync<DaktelaException>(() => client.GetAsync<JsonElement>("users"));
+
+        Assert.Equal(301, exception.StatusCode);
+        Assert.Contains("redirected the request to https://other.test/api/v6/users.json?accessToken=***", exception.Message);
+        Assert.DoesNotContain("s3cr3t", exception.ToString());
+        Assert.Single(handler.Urls);
+    }
+
+    [Fact]
+    public async Task RedirectFollowedToAnotherOriginByAnInjectedClient_FailsInsteadOfUsingTheResponse()
+    {
+        var handler = new StubHandler((_, _) =>
+        {
+            var response = StubHandler.Response("""{"result":{"data":[],"total":0}}""");
+            response.RequestMessage = new HttpRequestMessage(HttpMethod.Get, "https://evil.test/api/v6/users.json");
+            return response;
+        });
+        using var client = handler.CreateClient();
+
+        var exception = await Assert.ThrowsAsync<DaktelaException>(() => client.GetAsync<JsonElement>("users"));
+
+        Assert.Contains("https://evil.test", exception.Message);
+        Assert.Contains("Disable automatic redirects", exception.Message);
+        Assert.False(await client.PingAsync());
+    }
+
+    [Fact]
+    public async Task RedirectFollowedWithinTheSameOrigin_IsAccepted()
+    {
+        var handler = new StubHandler((_, _) =>
+        {
+            var response = StubHandler.Response("""{"result":{"data":[],"total":0}}""");
+            response.RequestMessage = new HttpRequestMessage(
+                HttpMethod.Get, "https://TENANT.daktela.test/api/v6/users.json?moved=1");
+            return response;
+        });
+        using var client = handler.CreateClient();
+
+        Assert.True((await client.GetAsync<JsonElement>("users")).IsSuccess);
+    }
+
+    [Fact]
     public async Task ConnectionErrorWithoutSecrets_KeepsItsInnerException()
     {
         var handler = new StubHandler((_, _) => throw new HttpRequestException("Connection refused"));
